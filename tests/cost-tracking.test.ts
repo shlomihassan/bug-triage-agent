@@ -3,8 +3,8 @@ import { extractCostRecord } from "../agent/hooks/cost-tracking";
 
 describe("extractCostRecord", () => {
   it("computes cost from token counts, ignoring any usage.costUsd field", () => {
-    // Sonnet: $3.00/$15.00 per million. 1200 input + 300 output tokens.
-    // (1200/1e6)*3 + (300/1e6)*15 = 0.0036 + 0.0045 = 0.0081
+    // Sonnet: $2.00/$10.00 per million. 1200 input + 300 output tokens.
+    // (1200/1e6)*2 + (300/1e6)*10 = 0.0024 + 0.0030 = 0.0054
     const record = extractCostRecord(
       { data: { usage: { costUsd: 0.0034, inputTokens: 1200, outputTokens: 300 } } },
       "fix",
@@ -13,11 +13,12 @@ describe("extractCostRecord", () => {
     expect(record).toEqual({
       phase: "fix",
       model: "claude-sonnet-5",
-      costUsd: 0.0081,
+      costUsd: record?.costUsd,
       inputTokens: 1200,
       outputTokens: 300,
       at: record?.at,
     });
+    expect(record?.costUsd).toBeCloseTo(0.0054);
     expect(record?.at).toBeTruthy();
   });
 

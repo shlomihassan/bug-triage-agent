@@ -1083,16 +1083,24 @@ explicitly-labeled pricing table (Step 0 below); Tasks 11 and 12 reuse it.
 
 - [ ] **Step 0: Pricing table**
 
+**Correction, verified live during Task 17:** the pricing table below originally used
+$3/$15 (Sonnet) and $15/$75 (Opus) per million tokens — guesses that turned out to be wrong by
+1.5x and 3x respectively (only the Haiku figures were accidentally correct). Fetched directly
+from `platform.claude.com/docs/en/about-claude/pricing` on 2026-08-20 and corrected below: Sonnet
+5 is $2/$10, Opus 5 is $5/$25. This means real spend during earlier live testing was
+overstated by the dashboard, not understated — still real money, but less than first reported.
+
 ```ts
 // agent/lib/pricing.ts
-// Anthropic per-model pricing in USD per million tokens. VERIFY AGAINST
-// https://www.anthropic.com/pricing BEFORE RELYING ON THESE FOR REAL BUDGET DECISIONS —
-// this table is a snapshot as of this plan's writing (2026-08-19), not fetched dynamically,
-// and Anthropic can change published rates at any time.
+// Anthropic per-model pricing in USD per million tokens. Verified directly against
+// https://platform.claude.com/docs/en/about-claude/pricing on 2026-08-20 (base input/output
+// rates; this project uses neither prompt caching nor batch processing). Anthropic can still
+// change published rates after this date — re-verify before relying on these for real budget
+// decisions on a long-running deployment.
 const PRICING_PER_MILLION_TOKENS: Record<string, { input: number; output: number }> = {
   "claude-haiku-4-5-20251001": { input: 1.0, output: 5.0 },
-  "claude-sonnet-5": { input: 3.0, output: 15.0 },
-  "claude-opus-5": { input: 15.0, output: 75.0 },
+  "claude-sonnet-5": { input: 2.0, output: 10.0 },
+  "claude-opus-5": { input: 5.0, output: 25.0 },
 };
 
 export function calculateCostUsd(
@@ -1101,7 +1109,10 @@ export function calculateCostUsd(
   outputTokens: number,
 ): number {
   const rates = PRICING_PER_MILLION_TOKENS[model];
-  if (!rates) return 0;
+  if (!rates) {
+    console.warn(`calculateCostUsd: unrecognized model "${model}", returning $0 cost`);
+    return 0;
+  }
   return (inputTokens / 1_000_000) * rates.input + (outputTokens / 1_000_000) * rates.output;
 }
 ```
@@ -1118,8 +1129,8 @@ describe("calculateCostUsd", () => {
   });
 
   it("scales linearly for partial-million token counts", () => {
-    // 500,000 input tokens at Sonnet's $3.00/million = $1.50; 0 output tokens = $0.
-    expect(calculateCostUsd("claude-sonnet-5", 500_000, 0)).toBeCloseTo(1.5);
+    // 500,000 input tokens at Sonnet's $2.00/million = $1.00; 0 output tokens = $0.
+    expect(calculateCostUsd("claude-sonnet-5", 500_000, 0)).toBeCloseTo(1.0);
   });
 
   it("returns 0 for an unknown model rather than throwing", () => {
@@ -1127,6 +1138,16 @@ describe("calculateCostUsd", () => {
   });
 });
 ```
+
+**Second correction, added during Task 17 after a real incident:** `agent/agent.ts` originally
+had no `limits` configured at all. A live test session ran ~40 unbounded Sonnet steps without
+converging or hitting any cap, because eve's own defaults (`maxInputTokensPerSession`:
+40,000,000; `sessionTimeoutMs`: 30 days) are sized for a much larger class of agent than a
+single bug-fix task — the run never came close to tripping them. Fixed by adding explicit,
+much tighter limits targeting a ~$3 per-session ceiling at Sonnet 5's verified rate:
+`maxInputTokensPerSession: 750_000` (~$1.50), `maxOutputTokensPerSession: 150_000` (~$1.50),
+`sessionTimeoutMs: 7 * 60 * 1000`. See Task 5's `agent/agent.ts` — the actual code now includes
+this `limits` block.
 
 - [ ] **Step 1: Shared model getters**
 

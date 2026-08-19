@@ -8,8 +8,8 @@ describe("calculateCostUsd", () => {
   });
 
   it("scales linearly for partial-million token counts", () => {
-    // 500,000 input tokens at Sonnet's $3.00/million = $1.50; 0 output tokens = $0.
-    expect(calculateCostUsd("claude-sonnet-5", 500_000, 0)).toBeCloseTo(1.5);
+    // 500,000 input tokens at Sonnet's $2.00/million = $1.00; 0 output tokens = $0.
+    expect(calculateCostUsd("claude-sonnet-5", 500_000, 0)).toBeCloseTo(1.0);
   });
 
   it("returns 0 for an unknown model rather than throwing", () => {
