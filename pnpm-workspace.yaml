@@ -1,3 +1,5 @@
+packages:
+  - "."
 minimumReleaseAgeExclude:
   - "@ai-sdk/*"
   - "@rolldown/*"
