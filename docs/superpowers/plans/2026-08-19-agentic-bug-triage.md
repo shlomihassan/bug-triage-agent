@@ -452,9 +452,19 @@ the cause, and the fix is a tool-level `ctx.getSandbox()` call to `setNetworkPol
 cannot do this — `HookContext` has no sandbox accessor) before the solve phase's first
 install/test command.
 
+**Second correction, discovered via live testing in Task 17:** the default sandbox turned out
+NOT to be sufficient after all. The GitHub channel's own automatic checkout failed on the real
+deployment with `fatal: detected dubious ownership in repository at '/workspace'` — the
+sandbox volume's UID doesn't match the process UID inside it, which git treats as a safety
+violation by default. `agent/sandbox/sandbox.ts` is back, but now doing something different
+from either its original (redundant clone) or its briefly-deleted state: it runs
+`git config --global --add safe.directory /workspace` in `onSession`, once per session, before
+the channel's first per-turn checkout. This is setup-only — it still does not clone or touch
+git remotes itself, so it doesn't reintroduce the original duplication problem.
+
 **Files:**
 - Create: `agent/lib/config.ts`
-- ~~Create: `agent/sandbox/sandbox.ts`~~ (removed by the correction above — the default sandbox is sufficient once the GitHub channel owns checkout)
+- Create: `agent/sandbox/sandbox.ts` (setup-only — see the second correction above; NOT a clone)
 
 **Interfaces:**
 - Consumes: `process.env.GITHUB_OWNER`, `process.env.GITHUB_REPO`.
