@@ -2,7 +2,7 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
 import { generateObject } from "ai";
-import { haikuModel } from "../lib/anthropic";
+import { haikuModel, HAIKU_MODEL_ID } from "../lib/anthropic";
 import { calculateCostUsd } from "../lib/pricing";
 import { createRedisStore } from "../lib/store";
 
@@ -43,8 +43,8 @@ export default defineTool({
     await store
       .recordModelCall(ctx.session.id, {
         phase: "assess_blast_radius",
-        model: "claude-haiku-4-5-20251001",
-        costUsd: calculateCostUsd("claude-haiku-4-5-20251001", inputTokens, outputTokens),
+        model: HAIKU_MODEL_ID,
+        costUsd: calculateCostUsd(HAIKU_MODEL_ID, inputTokens, outputTokens),
         inputTokens,
         outputTokens,
         at: new Date().toISOString(),

@@ -1,7 +1,7 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
 import { generateText } from "ai";
-import { opusModel } from "../lib/anthropic";
+import { opusModel, OPUS_MODEL_ID } from "../lib/anthropic";
 import { calculateCostUsd } from "../lib/pricing";
 import { createRedisStore } from "../lib/store";
 
@@ -35,8 +35,8 @@ export default defineTool({
     await store
       .recordModelCall(ctx.session.id, {
         phase: "escalate_to_opus",
-        model: "claude-opus-5",
-        costUsd: calculateCostUsd("claude-opus-5", inputTokens, outputTokens),
+        model: OPUS_MODEL_ID,
+        costUsd: calculateCostUsd(OPUS_MODEL_ID, inputTokens, outputTokens),
         inputTokens,
         outputTokens,
         at: new Date().toISOString(),
