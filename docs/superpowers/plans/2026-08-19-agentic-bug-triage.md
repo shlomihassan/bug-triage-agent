@@ -424,9 +424,37 @@ git commit -m "chore: scaffold eve project with direct Anthropic model"
 
 ## Task 6: Sandbox bootstrap — clone the Vikunja fork
 
+**Correction to the plan, discovered during the final whole-branch review (after Task 15
+wired the GitHub channel):** the custom `agent/sandbox/sandbox.ts` bootstrap below clones the
+fork over unauthenticated `https://github.com/...` into `/workspace/repo`. But eve's
+`githubChannel` (Task 15) already checks out the repo automatically on **every turn**, via a
+built-in `turn.started` handler (confirmed in `node_modules/eve/dist/src/public/channels/github/checkout.js`:
+`resolvePath(n.path ?? "/workspace")`) — authenticated (the installation token is brokered at
+the sandbox firewall, never embedded in the URL), into `/workspace` (not `/workspace/repo`).
+Left as originally written, the sandbox ends up with **two separate checkouts of the same
+repo** at different paths, and `agent/instructions.md` (Task 15) pointed every command at the
+bootstrap's unauthenticated `/workspace/repo` — the one the channel doesn't know about — rather
+than the channel-managed, authenticated `/workspace`. This is fixed by removing this task's git
+clone step entirely (Step 2 below is now a no-op/deleted file) and pointing
+`agent/instructions.md` at `/workspace` instead; see Task 15's corresponding correction note.
+`agent/lib/config.ts`'s `loadConfig()` is unaffected and still needed — `open_pr.ts` (Task 14)
+uses it for its own separate PAT-authenticated Octokit call, independent of the channel's
+checkout.
+
+One related risk this correction does **not** attempt to fix blind (no live sandbox available
+to verify against): the channel's checkout also calls `sandbox.setNetworkPolicy(...)` with an
+allow-list of only `github.com`/`codeload.github.com` (deny-all otherwise) on every turn. This
+would block `pnpm install`/`mage test:*`'s own dependency fetches (npm registry, Go module
+proxy) during the solve phase, unless something widens the policy again after checkout runs.
+**Flag this explicitly as a thing to watch for in Task 17's live end-to-end run** — if the
+agent's `bash` calls start failing with network errors during dependency installation, this is
+the cause, and the fix is a tool-level `ctx.getSandbox()` call to `setNetworkPolicy` (hooks
+cannot do this — `HookContext` has no sandbox accessor) before the solve phase's first
+install/test command.
+
 **Files:**
-- Create: `agent/sandbox/sandbox.ts`
 - Create: `agent/lib/config.ts`
+- ~~Create: `agent/sandbox/sandbox.ts`~~ (removed by the correction above — the default sandbox is sufficient once the GitHub channel owns checkout)
 
 **Interfaces:**
 - Consumes: `process.env.GITHUB_OWNER`, `process.env.GITHUB_REPO`.
@@ -450,41 +478,30 @@ export function loadConfig(): AppConfig {
 }
 ```
 
-- [ ] **Step 2: Write the sandbox bootstrap**
+- [ ] **Step 2 (superseded — do not create `agent/sandbox/sandbox.ts`):** the GitHub channel
+(Task 15) checks out the repo automatically into `/workspace` on every turn, authenticated. A
+custom sandbox bootstrap would only create a second, unauthenticated, unused checkout. If
+`agent/sandbox/sandbox.ts` already exists from before this correction, delete it.
 
-```ts
-// agent/sandbox/sandbox.ts
-import { defineSandbox } from "eve/sandbox";
-import { loadConfig } from "../lib/config";
+`/workspace` (not `/workspace/repo`) becomes the working tree every default tool (`bash`,
+`read_file`, `glob`, `grep`) operates against, populated by the channel — see Task 15's
+correction note for how `agent/instructions.md` reflects this.
 
-export default defineSandbox({
-  revalidationKey: () => "vikunja-bootstrap-v1",
-  async bootstrap({ use }) {
-    const sandbox = await use();
-    const { githubOwner, githubRepo } = loadConfig();
-    await sandbox.run({
-      command: `git clone --depth 1 https://github.com/${githubOwner}/${githubRepo}.git /workspace/repo`,
-    });
-  },
-});
-```
-
-`/workspace/repo` becomes the working tree every default tool (`bash`, `read_file`, `glob`, `grep`) and every authored tool's `ctx.getSandbox()` operates against.
-
-- [ ] **Step 3: Verify the sandbox boots and clones**
+- [ ] **Step 3: Verify the config loader typechecks**
 
 ```bash
-cp .env.example .env.local
-# fill in GITHUB_OWNER=<your-github-username>, GITHUB_REPO=vikunja, ANTHROPIC_API_KEY=<key>
-npm run dev
+npm run typecheck
 ```
 
-In the dev TUI, ask: `List the top-level files under /workspace/repo`. Expected: the real Vikunja file tree (`pkg/`, `frontend/`, `go.mod`, ...).
+Live verification of the actual checkout (that `/workspace` really does contain the Vikunja
+tree once a real issue triggers a session) happens in Task 17, once the GitHub channel and a
+real installation exist — there is no sandbox to boot against in this task anymore, since
+Task 6 no longer owns any sandbox definition.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add agent/sandbox/sandbox.ts agent/lib/config.ts
+git add agent/lib/config.ts
 git commit -m "feat: bootstrap sandbox by cloning the vikunja fork"
 ```
 
@@ -1684,14 +1701,27 @@ export default githubChannel({
 });
 ```
 
+**Correction to the plan, discovered during the final whole-branch review:** every
+`/workspace/repo` reference below is corrected to `/workspace` — see Task 6's correction note
+for why (the GitHub channel checks out the repo into `/workspace`, not a custom `/repo`
+subdirectory). An explicit safety prohibition on touching `main` has also been added to phase
+2 below — the plan's own Global Constraint ("Never auto-merge or push directly to main") had no
+corresponding sentence in the model-facing instructions, and this file is the only thing
+governing what the freeform `bash` tool actually does.
+
 - [ ] **Step 3: Write `agent/instructions.md`**
 
 ```md
-You are a bug-triage-and-fix agent for the Vikunja fork checked out at `/workspace/repo`
+You are a bug-triage-and-fix agent for the Vikunja fork checked out at `/workspace`
 (Go backend under `pkg/`, Vue 3 frontend under `frontend/src`). You were triggered by a
 GitHub issue reporting a bug. Work through these phases in order, narrating your findings
 in plain text as you go — your replies are posted as comments on the issue, so write them
 for a developer reading along, not just for yourself.
+
+Never run any git command that pushes, merges, rebases onto, or checks out `main` directly.
+Every change happens on a `fix/issue-<number>` branch, delivered only through the `open_pr`
+tool (which always opens a draft PR, never merges). If a push to your branch fails or is
+rejected, stop and explain the failure in your reply — do not retry against `main`.
 
 ## 0. Load prior context
 
@@ -1704,9 +1734,9 @@ don't rediscover file locations or patterns already documented there.
 2. Reproduce the bug: write a targeted failing test that demonstrates exactly the reported
    behavior.
    - Backend: a Go test in the relevant `pkg/models/*_test.go` file, run with
-     `mage test:filter <TestName>` from `/workspace/repo`.
+     `mage test:filter <TestName>` from `/workspace`.
    - Frontend: a Vitest test alongside the relevant file, run with
-     `cd /workspace/repo/frontend && pnpm test:unit <path>`.
+     `cd /workspace/frontend && pnpm test:unit <path>`.
    Confirm it actually fails on the current code. If you cannot get a failing test to
    reproduce the reported behavior after a reasonable effort, call
    `report_could_not_reproduce` with the issue number/title and what you tried, explain
@@ -1721,21 +1751,21 @@ don't rediscover file locations or patterns already documented there.
 
 ## 2. Solve (only if phase 1 produced a reproducing failing test)
 
-1. Create a branch: `git -C /workspace/repo checkout -b fix/issue-<number>`.
+1. Create a branch: `git -C /workspace checkout -b fix/issue-<number>`.
 2. Edit code until the repro test passes. Then run the full check suite:
    - Backend changes: `mage lint` and `mage test:web` (or `mage test:feature`, whichever
-     covers the touched package) from `/workspace/repo`.
+     covers the touched package) from `/workspace`.
    - Frontend changes: `pnpm lint` and `pnpm typecheck` and `pnpm test:unit` from
-     `/workspace/repo/frontend`.
+     `/workspace/frontend`.
    If you've made 3 attempts and the repro test still doesn't pass, call
    `escalate_to_opus` with the issue, your root cause, every attempted diff, and the last
    test output — then apply its suggestion yourself and re-run the checks. Do not call it
    before 3 genuine attempts.
 3. Once the repro test and full check suite pass, compute the diff stats
-   (`git -C /workspace/repo diff --stat main`) and call `assess_blast_radius` with the
+   (`git -C /workspace diff --stat main`) and call `assess_blast_radius` with the
    diff and changed file list.
-4. Commit and push the branch: `git -C /workspace/repo add -A && git -C /workspace/repo
-   commit -m "fix: <short description>" && git -C /workspace/repo push origin
+4. Commit and push the branch: `git -C /workspace add -A && git -C /workspace
+   commit -m "fix: <short description>" && git -C /workspace push origin
    fix/issue-<number>`.
 5. Call `open_pr` with the issue number, branch name, a PR title/body (include: issue
    link, root cause, the repro test, verification results, blast-radius rationale), and
