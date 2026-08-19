@@ -74,8 +74,6 @@ export function createRedisStore(): BugRunStore {
   const redis = Redis.fromEnv();
   return {
     async createRun({ runId, issueNumber, issueTitle }) {
-      const existing = await redis.get<BugRun>(RUN_KEY(runId));
-      if (existing) return;
       const run: BugRun = {
         runId,
         issueNumber,
@@ -84,8 +82,12 @@ export function createRedisStore(): BugRunStore {
         startedAt: new Date().toISOString(),
         modelCalls: [],
       };
-      await redis.set(RUN_KEY(runId), run);
-      await redis.lpush(RUN_INDEX_KEY, runId);
+      // Atomic: SET key value NX returns null if key already exists
+      const result = await redis.set(RUN_KEY(runId), run, { nx: true });
+      // Only add to index if the set succeeded (result is "OK")
+      if (result) {
+        await redis.lpush(RUN_INDEX_KEY, runId);
+      }
     },
     async updateRun(runId, patch) {
       const run = await redis.get<BugRun>(RUN_KEY(runId));
