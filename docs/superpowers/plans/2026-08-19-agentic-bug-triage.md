@@ -905,6 +905,18 @@ git commit -m "feat: add bug-run store with in-memory and Redis backends"
 
 ## Task 9: Cost-tracking hook
 
+**Correction to the plan, discovered via Task 17's live end-to-end test:** eve's own
+`step.completed.data.usage.costUsd` — which this task originally trusted as-is — turned out to
+never be populated for this agent's configuration. Real deployment logs showed five genuine
+Sonnet steps (~19,000-20,000 input tokens, hundreds of output tokens each) all recording
+`costUsd: $0.0000`. The likely reason: eve/AI Gateway computes that field when a model is
+routed through the Gateway; this agent calls `@ai-sdk/anthropic` directly (`agent/agent.ts`),
+bypassing the Gateway entirely by design (see the Global Constraints' model-routing note), so
+nothing in that path has pricing knowledge of the call. Fixed by having `extractCostRecord`
+compute `costUsd` itself via `calculateCostUsd()` (Task 10's `agent/lib/pricing.ts`) from the
+real `inputTokens`/`outputTokens` eve does report — the same approach already used for the
+three direct-call tools — rather than trusting a field this configuration never fills in.
+
 **Files:**
 - Create: `agent/hooks/cost-tracking.ts`
 - Test: `tests/cost-tracking.test.ts`
