@@ -13,7 +13,7 @@
 - Blank-repo build: no code, git history, or shared Vercel project copied from any prior related project. Only architectural patterns are reused (cited inline where relevant), never files.
 - Node.js >=24 (eve's requirement).
 - Never auto-merge or push directly to `main` on the Vikunja fork — draft PRs only.
-- Every model call must be logged with real `costUsd`/`inputTokens`/`outputTokens` (from eve's `step.completed` event, or from the raw AI SDK `usage` object for direct calls made inside a tool).
+- Every model call must be logged with real `costUsd`/`inputTokens`/`outputTokens`: `inputTokens`/`outputTokens` come from eve's `step.completed` event or the raw AI SDK `usage` object depending on the call site; `costUsd` comes from eve's `step.completed.data.usage.costUsd` for the primary agent loop (Task 9), or from `calculateCostUsd()` (Task 10's `agent/lib/pricing.ts`) for direct-call tools — the raw AI SDK `usage` object has no `costUsd` field of its own.
 - Model routing: `claude-sonnet-5` drives the main agent loop (reproduction + fix-writing); `claude-haiku-4-5-20251001` for severity/blast-radius classification; `claude-opus-5` only via the explicit stuck-fix escalation path.
 - No RAG/embeddings for cross-bug memory — an append-only notes log read into context at session start.
 
@@ -55,12 +55,14 @@ bug-triage-agent/
 │       ├── autonomy.ts                # pure requiresApproval() override function
 │       ├── config.ts                  # env var loading/validation
 │       ├── store.ts                   # BugRunStore: Redis-backed + in-memory
-│       └── anthropic.ts               # shared @ai-sdk/anthropic model getters
+│       ├── anthropic.ts               # shared @ai-sdk/anthropic model getters
+│       └── pricing.ts                 # calculateCostUsd() — the AI SDK usage object has no costUsd field
 └── tests/
     ├── autonomy.test.ts
     ├── store.test.ts
     ├── cost-tracking.test.ts
     ├── anthropic.test.ts
+    ├── pricing.test.ts
     └── open-pr-approval.test.ts
 ```
 
@@ -1015,14 +1017,77 @@ git commit -m "feat: track real per-step cost from eve's step.completed usage da
 
 ## Task 10: `classify_severity` tool (Haiku)
 
+**Correction to the plan, discovered during implementation:** every direct-call tool below
+originally read `usage.costUsd` off the raw Vercel AI SDK's `generateObject`/`generateText`
+return value, on the assumption it worked like eve's own `step.completed.data.usage` (Task 9,
+confirmed real via eve's own vendored types). It doesn't — the AI SDK's `LanguageModelUsage`
+type (`node_modules/ai/dist/index.d.ts`) has only token counts (`inputTokens`, `outputTokens`,
+`inputTokenDetails`, etc.), no `costUsd` field at all. `costUsd` only exists on eve's event
+because eve/AI Gateway computes it from a pricing table; a direct provider call bypasses that
+entirely. Left as originally written, every Haiku/Opus tool call's `costUsd` would silently
+read as `undefined` and default to `0` — quietly breaking the budget-tracking story for exactly
+the calls meant to demonstrate cheap-vs-expensive model routing. Fixed here with a small,
+explicitly-labeled pricing table (Step 0 below); Tasks 11 and 12 reuse it.
+
 **Files:**
+- Create: `agent/lib/pricing.ts`
+- Test: `tests/pricing.test.ts`
 - Create: `agent/tools/classify_severity.ts`
 - Create: `agent/lib/anthropic.ts`
 - Test: `tests/anthropic.test.ts`
 
 **Interfaces:**
 - Consumes: `BugRunStore` (Task 8).
-- Produces: tool `classify_severity`, callable by the model during triage; returns `{ severity: Severity; rationale: string }`.
+- Produces: `calculateCostUsd(model, inputTokens, outputTokens): number`, reused by Tasks 11 and
+  12. Produces: tool `classify_severity`, callable by the model during triage; returns
+  `{ severity: Severity; rationale: string }`.
+
+- [ ] **Step 0: Pricing table**
+
+```ts
+// agent/lib/pricing.ts
+// Anthropic per-model pricing in USD per million tokens. VERIFY AGAINST
+// https://www.anthropic.com/pricing BEFORE RELYING ON THESE FOR REAL BUDGET DECISIONS —
+// this table is a snapshot as of this plan's writing (2026-08-19), not fetched dynamically,
+// and Anthropic can change published rates at any time.
+const PRICING_PER_MILLION_TOKENS: Record<string, { input: number; output: number }> = {
+  "claude-haiku-4-5-20251001": { input: 1.0, output: 5.0 },
+  "claude-sonnet-5": { input: 3.0, output: 15.0 },
+  "claude-opus-5": { input: 15.0, output: 75.0 },
+};
+
+export function calculateCostUsd(
+  model: string,
+  inputTokens: number,
+  outputTokens: number,
+): number {
+  const rates = PRICING_PER_MILLION_TOKENS[model];
+  if (!rates) return 0;
+  return (inputTokens / 1_000_000) * rates.input + (outputTokens / 1_000_000) * rates.output;
+}
+```
+
+```ts
+// tests/pricing.test.ts
+import { describe, it, expect } from "vitest";
+import { calculateCostUsd } from "../agent/lib/pricing";
+
+describe("calculateCostUsd", () => {
+  it("computes cost from input and output tokens at the model's published rates", () => {
+    // 1,000,000 input + 1,000,000 output tokens at Haiku's $1.00/$5.00 per million.
+    expect(calculateCostUsd("claude-haiku-4-5-20251001", 1_000_000, 1_000_000)).toBeCloseTo(6.0);
+  });
+
+  it("scales linearly for partial-million token counts", () => {
+    // 500,000 input tokens at Sonnet's $3.00/million = $1.50; 0 output tokens = $0.
+    expect(calculateCostUsd("claude-sonnet-5", 500_000, 0)).toBeCloseTo(1.5);
+  });
+
+  it("returns 0 for an unknown model rather than throwing", () => {
+    expect(calculateCostUsd("some-unknown-model", 1_000_000, 1_000_000)).toBe(0);
+  });
+});
+```
 
 - [ ] **Step 1: Shared model getters**
 
@@ -1043,6 +1108,7 @@ import { defineTool } from "eve/tools";
 import { z } from "zod";
 import { generateObject } from "ai";
 import { haikuModel } from "../lib/anthropic";
+import { calculateCostUsd } from "../lib/pricing";
 import { createRedisStore } from "../lib/store";
 
 const severitySchema = z.object({
@@ -1083,13 +1149,15 @@ export default defineTool({
         "edge-case. Respond with one tight sentence of rationale citing the specific impact.",
       prompt: JSON.stringify({ issueTitle, issueBody, rootCause, reproTestPassed }),
     });
+    const inputTokens = usage.inputTokens ?? 0;
+    const outputTokens = usage.outputTokens ?? 0;
     await store
       .recordModelCall(ctx.session.id, {
         phase: "classify_severity",
         model: "claude-haiku-4-5-20251001",
-        costUsd: usage.costUsd ?? 0,
-        inputTokens: usage.inputTokens ?? 0,
-        outputTokens: usage.outputTokens ?? 0,
+        costUsd: calculateCostUsd("claude-haiku-4-5-20251001", inputTokens, outputTokens),
+        inputTokens,
+        outputTokens,
         at: new Date().toISOString(),
       })
       .catch(() => {});
@@ -1138,7 +1206,7 @@ Expected: no type errors.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add agent/tools/classify_severity.ts agent/lib/anthropic.ts tests/anthropic.test.ts
+git add agent/tools/classify_severity.ts agent/lib/anthropic.ts agent/lib/pricing.ts tests/anthropic.test.ts tests/pricing.test.ts
 git commit -m "feat: add classify_severity tool backed by direct Haiku call"
 ```
 
@@ -1150,6 +1218,7 @@ git commit -m "feat: add classify_severity tool backed by direct Haiku call"
 - Create: `agent/tools/assess_blast_radius.ts`
 
 **Interfaces:**
+- Consumes: `calculateCostUsd` (Task 10's `agent/lib/pricing.ts`) — the raw AI SDK `usage` object has no `costUsd` field (see Task 10's correction note); this tool computes it the same way classify_severity does.
 - Produces: tool `assess_blast_radius`, returns `{ blastRadiusTier: BlastRadiusTier; rationale: string }`.
 
 - [ ] **Step 1: Implement**
@@ -1160,6 +1229,7 @@ import { defineTool } from "eve/tools";
 import { z } from "zod";
 import { generateObject } from "ai";
 import { haikuModel } from "../lib/anthropic";
+import { calculateCostUsd } from "../lib/pricing";
 import { createRedisStore } from "../lib/store";
 
 const blastRadiusSchema = z.object({
@@ -1194,13 +1264,15 @@ export default defineTool({
         "file(s)/pattern that drove the rating in one tight sentence.",
       prompt: JSON.stringify({ filesChanged, diff }),
     });
+    const inputTokens = usage.inputTokens ?? 0;
+    const outputTokens = usage.outputTokens ?? 0;
     await store
       .recordModelCall(ctx.session.id, {
         phase: "assess_blast_radius",
         model: "claude-haiku-4-5-20251001",
-        costUsd: usage.costUsd ?? 0,
-        inputTokens: usage.inputTokens ?? 0,
-        outputTokens: usage.outputTokens ?? 0,
+        costUsd: calculateCostUsd("claude-haiku-4-5-20251001", inputTokens, outputTokens),
+        inputTokens,
+        outputTokens,
         at: new Date().toISOString(),
       })
       .catch(() => {});
@@ -1231,6 +1303,7 @@ git commit -m "feat: add assess_blast_radius tool backed by direct Haiku call"
 - Create: `agent/tools/escalate_to_opus.ts`
 
 **Interfaces:**
+- Consumes: `calculateCostUsd` (Task 10's `agent/lib/pricing.ts`) — see Task 10's correction note on why the raw AI SDK `usage` object can't supply `costUsd` directly.
 - Produces: tool `escalate_to_opus`, returns `{ suggestion: string }` — a text suggestion the primary Sonnet-driven loop applies itself via its normal `read_file`/`write_file`/`bash` tools (this tool never edits files directly).
 
 - [ ] **Step 1: Implement**
@@ -1241,6 +1314,7 @@ import { defineTool } from "eve/tools";
 import { z } from "zod";
 import { generateText } from "ai";
 import { opusModel } from "../lib/anthropic";
+import { calculateCostUsd } from "../lib/pricing";
 import { createRedisStore } from "../lib/store";
 
 const inputSchema = z.object({
@@ -1268,13 +1342,15 @@ export default defineTool({
         "concrete fix as a unified diff or precise file-by-file instructions.",
       prompt: JSON.stringify(input),
     });
+    const inputTokens = usage.inputTokens ?? 0;
+    const outputTokens = usage.outputTokens ?? 0;
     await store
       .recordModelCall(ctx.session.id, {
         phase: "escalate_to_opus",
         model: "claude-opus-5",
-        costUsd: usage.costUsd ?? 0,
-        inputTokens: usage.inputTokens ?? 0,
-        outputTokens: usage.outputTokens ?? 0,
+        costUsd: calculateCostUsd("claude-opus-5", inputTokens, outputTokens),
+        inputTokens,
+        outputTokens,
         at: new Date().toISOString(),
       })
       .catch(() => {});
