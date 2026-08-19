@@ -74,7 +74,7 @@ export default defineChannel({
         <p>Status: ${run.status} | Severity: ${run.severity ?? "-"} | Blast radius: ${
         run.blastRadiusTier ?? "-"
       } | Outcome: ${run.outcome ?? "-"}</p>
-        <p>${run.prUrl ? `<a href="${run.prUrl}">Pull request</a>` : "No PR yet"}</p>
+        <p>${run.prUrl ? `<a href="${escapeHtml(run.prUrl)}">Pull request</a>` : "No PR yet"}</p>
         <p>Total cost: $${totalCost(run).toFixed(4)}</p>
         <h2>Model calls</h2>
         <table>
