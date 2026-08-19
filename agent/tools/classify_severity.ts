@@ -2,6 +2,7 @@ import { defineTool } from "eve/tools";
 import { z } from "zod";
 import { generateObject } from "ai";
 import { haikuModel } from "../lib/anthropic";
+import { calculateCostUsd } from "../lib/pricing";
 import { createRedisStore } from "../lib/store";
 
 const severitySchema = z.object({
@@ -42,13 +43,15 @@ export default defineTool({
         "edge-case. Respond with one tight sentence of rationale citing the specific impact.",
       prompt: JSON.stringify({ issueTitle, issueBody, rootCause, reproTestPassed }),
     });
+    const inputTokens = usage.inputTokens ?? 0;
+    const outputTokens = usage.outputTokens ?? 0;
     await store
       .recordModelCall(ctx.session.id, {
         phase: "classify_severity",
         model: "claude-haiku-4-5-20251001",
-        costUsd: (usage as any).costUsd ?? 0,
-        inputTokens: usage.inputTokens ?? 0,
-        outputTokens: usage.outputTokens ?? 0,
+        costUsd: calculateCostUsd("claude-haiku-4-5-20251001", inputTokens, outputTokens),
+        inputTokens,
+        outputTokens,
         at: new Date().toISOString(),
       })
       .catch(() => {});
