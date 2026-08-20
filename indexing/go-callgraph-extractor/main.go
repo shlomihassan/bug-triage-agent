@@ -58,12 +58,25 @@ func main() {
 	prog, _ := ssautil.AllPackages(pkgs, 0)
 	prog.Build()
 
+	// ssautil.AllFunctions returns every function reachable in the built SSA program,
+	// which includes the full transitive dependency closure (stdlib, runtime internals,
+	// etc.), not just the module we were asked to analyze. Restrict the symbol/edge
+	// output to functions belonging to the packages actually loaded from the target
+	// module, identified by import path.
+	loadedPkgPaths := map[string]bool{}
+	for _, p := range pkgs {
+		loadedPkgPaths[p.PkgPath] = true
+	}
+
 	symbolsByFunc := map[*ssa.Function]string{}
 	symbols := []Symbol{}
 	fset := prog.Fset
 
 	for fn := range ssautil.AllFunctions(prog) {
 		if fn == nil || fn.Syntax() == nil {
+			continue
+		}
+		if fn.Pkg == nil || fn.Pkg.Pkg == nil || !loadedPkgPaths[fn.Pkg.Pkg.Path()] {
 			continue
 		}
 		pos := fset.Position(fn.Pos())
