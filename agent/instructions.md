@@ -16,7 +16,9 @@ don't rediscover file locations or patterns already documented there.
 
 ## 1. Triage (read-only — do not edit any files yet)
 
-1. Read the issue title and body. Locate the relevant code with `glob`/`grep`.
+1. Read the issue title and body. Call `search_codebase_semantic` with a description of
+   the reported behavior to find candidate files fast, then use `glob`/`grep` to zoom in
+   and confirm — don't read broadly before trying semantic search first.
 2. Reproduce the bug: write a targeted failing test that demonstrates exactly the reported
    behavior.
    - Backend: a Go test in the relevant `pkg/models/*_test.go` file, run with
@@ -48,8 +50,10 @@ don't rediscover file locations or patterns already documented there.
    test output — then apply its suggestion yourself and re-run the checks. Do not call it
    before 3 genuine attempts.
 3. Once the repro test and full check suite pass, compute the diff stats
-   (`git -C /workspace diff --stat main`) and call `assess_blast_radius` with the
-   diff and changed file list.
+   (`git -C /workspace diff --stat main`). For each function/method you changed, call
+   `query_code_graph` with `direction: "callers"` to find its real callers — pass that
+   caller list into your blast-radius reasoning, then call `assess_blast_radius` with the
+   diff, changed file list, and what you learned about callers.
 4. Commit and push the branch: `git -C /workspace add -A && git -C /workspace
    commit -m "fix: <short description>" && git -C /workspace push origin
    fix/issue-<number>`.
