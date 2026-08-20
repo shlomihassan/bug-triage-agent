@@ -6,8 +6,11 @@ data instead of blind exploration and model guesswork, cutting per-run cost and 
 fix accuracy.
 
 **Architecture:** One indexing pipeline, run offline (once, incrementally re-runnable),
-builds a single SQLite file at `agent/lib/code-intelligence.sqlite`, committed to the
-repo alongside the other data-layer modules in `agent/lib/`. The file holds embedded
+builds a single SQLite file at `data/code-intelligence.sqlite`, committed to the repo.
+(The file lives in a top-level `data/` directory rather than beside the data-layer
+modules in `agent/lib/`, because eve's module discovery treats every entry under the
+agent root's `lib/` as an authored source module and fails the build on a binary file.)
+The file holds embedded
 code chunks (via the sqlite-vec extension) and a call graph (via plain relational
 tables), covering the Vikunja fork's Go, TypeScript/JavaScript, and Vue source. Two new
 agent tools query this file at run time. No external database, no persistent server, no
@@ -95,9 +98,9 @@ unaided.
 ```
 vikunja repo (local clone)
   -> [chunk + hash] -> [embed via Voyage] -> sqlite-vec table  \
-  -> [parse via go/callgraph + ts-morph] -> symbols/edges tables >  agent/lib/code-intelligence.sqlite
+  -> [parse via go/callgraph + ts-morph] -> symbols/edges tables >  data/code-intelligence.sqlite
                                                                   /
-commit agent/lib/code-intelligence.sqlite to bug-triage-agent repo, deploy
+commit data/code-intelligence.sqlite to bug-triage-agent repo, deploy
 ```
 
 **At run time (inside a live bug-triage session):**
@@ -109,7 +112,7 @@ agent is about to edit a function
   -> query_code_graph({symbolName, direction: "callers"}) -> recursive SQL -> caller list -> feeds assess_blast_radius
 ```
 
-## Schema (single SQLite file, `agent/lib/code-intelligence.sqlite`)
+## Schema (single SQLite file, `data/code-intelligence.sqlite`)
 
 - `chunks_vec` — sqlite-vec virtual table: chunk id, embedding vector, file path, start/end line, language.
 - `chunk_manifest` — chunk id, content hash (for incremental re-indexing).
@@ -123,7 +126,7 @@ agent is about to edit a function
   to its existing grep/read capability — a code-intelligence failure never blocks a run.
 - The indexing script is idempotent (content-hash-based upserts), so an interrupted run
   can be safely re-run without duplicating or corrupting data.
-- If `agent/lib/code-intelligence.sqlite` is missing or unreadable at run time (e.g., not yet
+- If `data/code-intelligence.sqlite` is missing or unreadable at run time (e.g., not yet
   built), both new tools report that clearly and the agent proceeds with its existing
   exploration tools — this subsystem is additive, not a hard dependency.
 

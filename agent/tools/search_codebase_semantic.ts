@@ -1,9 +1,8 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
 import type Database from "better-sqlite3";
-import { openCodeIntelligenceDb } from "../lib/code-intelligence-db";
+import { CODE_INTELLIGENCE_DB_PATH, openCodeIntelligenceDb } from "../lib/code-intelligence-db";
 import { embedTexts } from "../../indexing/embed-semantic";
-import { join } from "node:path";
 
 export interface ChunkMatch {
   filePath: string;
@@ -39,7 +38,7 @@ export function searchChunks(db: Database.Database, queryEmbedding: number[], to
     .filter((r): r is ChunkMatch => r !== null);
 }
 
-const DB_PATH = join(process.cwd(), "agent/lib/code-intelligence.sqlite");
+const DB_PATH = CODE_INTELLIGENCE_DB_PATH;
 
 export default defineTool({
   description:

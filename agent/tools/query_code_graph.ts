@@ -1,8 +1,7 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
 import type Database from "better-sqlite3";
-import { openCodeIntelligenceDb } from "../lib/code-intelligence-db";
-import { join } from "node:path";
+import { CODE_INTELLIGENCE_DB_PATH, openCodeIntelligenceDb } from "../lib/code-intelligence-db";
 
 export interface RelatedSymbol {
   symbol: string;
@@ -87,7 +86,7 @@ export function findRelatedSymbols(
   return { matches };
 }
 
-const DB_PATH = join(process.cwd(), "agent/lib/code-intelligence.sqlite");
+const DB_PATH = CODE_INTELLIGENCE_DB_PATH;
 
 const inputSchema = z.object({
   symbolName: z.string().describe("The function or method name to look up, e.g. 'CanDelete'"),

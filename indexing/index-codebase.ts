@@ -10,9 +10,9 @@
 // relative to process.cwd(), matching the convention already used by
 // agent/tools/query_code_graph.ts and agent/tools/search_codebase_semantic.ts).
 import { execFileSync } from "node:child_process";
-import { readFileSync, globSync } from "node:fs";
-import { join, relative, resolve } from "node:path";
-import { openCodeIntelligenceDb } from "../agent/lib/code-intelligence-db";
+import { readFileSync, globSync, mkdirSync } from "node:fs";
+import { dirname, join, relative, resolve } from "node:path";
+import { CODE_INTELLIGENCE_DB_PATH, openCodeIntelligenceDb } from "../agent/lib/code-intelligence-db";
 import { extractTsGraph } from "./build-ts-graph";
 import { embedTextsWithUsage, hashContent, truncateForEmbedding, upsertChunks } from "./embed-semantic";
 import type { Symbol, Edge } from "../agent/lib/code-intelligence-schema";
@@ -85,7 +85,8 @@ async function main() {
   }
   if (droppedEdges > 0) console.log(`  (dropped ${droppedEdges} edges with unresolvable endpoints)`);
 
-  const dbPath = join(process.cwd(), "agent/lib/code-intelligence.sqlite");
+  const dbPath = CODE_INTELLIGENCE_DB_PATH;
+  mkdirSync(dirname(dbPath), { recursive: true });
   const db = openCodeIntelligenceDb(dbPath);
 
   console.log(`Writing ${allSymbols.length} symbols and ${allEdges.length} edges...`);
