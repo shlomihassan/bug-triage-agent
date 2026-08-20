@@ -72,21 +72,32 @@ export function createMemoryStore(): BugRunStore {
 
 export function createRedisStore(): BugRunStore {
   const redis = Redis.fromEnv();
+
+  if (!process.env.UPSTASH_REDIS_REST_URL || !process.env.UPSTASH_REDIS_REST_TOKEN) {
+    console.warn("⚠️ Redis env vars not configured - store will fail silently");
+  }
+
   return {
     async createRun({ runId, issueNumber, issueTitle }) {
-      const run: BugRun = {
-        runId,
-        issueNumber,
-        issueTitle,
-        status: "triaging",
-        startedAt: new Date().toISOString(),
-        modelCalls: [],
-      };
-      // Atomic: SET key value NX returns null if key already exists
-      const result = await redis.set(RUN_KEY(runId), run, { nx: true });
-      // Only add to index if the set succeeded (result is "OK")
-      if (result) {
-        await redis.lpush(RUN_INDEX_KEY, runId);
+      try {
+        const run: BugRun = {
+          runId,
+          issueNumber,
+          issueTitle,
+          status: "triaging",
+          startedAt: new Date().toISOString(),
+          modelCalls: [],
+        };
+        // Atomic: SET key value NX returns null if key already exists
+        const result = await redis.set(RUN_KEY(runId), run, { nx: true });
+        // Only add to index if the set succeeded (result is "OK")
+        if (result) {
+          await redis.lpush(RUN_INDEX_KEY, runId);
+        }
+        console.log(`✓ Created run: ${runId}`);
+      } catch (err) {
+        console.error(`❌ Failed to create run:`, err);
+        throw err;
       }
     },
     async updateRun(runId, patch) {

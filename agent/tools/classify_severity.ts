@@ -32,7 +32,11 @@ export default defineTool({
     // Lazily creates the run row: ctx.session.id (the real, stable run identifier) only exists
     // once inside a tool/hook, never at the GitHub channel's onIssue dispatch time (Task 15) —
     // see the createRun note in Task 8.
-    await store.createRun({ runId: ctx.session.id, issueNumber, issueTitle }).catch(() => {});
+    console.log(`[classify_severity] Starting for issue #${issueNumber}: ${issueTitle}`);
+    console.log(`[classify_severity] Session ID: ${ctx.session.id}`);
+    await store.createRun({ runId: ctx.session.id, issueNumber, issueTitle }).catch((err) => {
+      console.error(`[classify_severity] Failed to create run:`, err);
+    });
     const { object, usage } = await generateObject({
       model: haikuModel(),
       schema: severitySchema,
