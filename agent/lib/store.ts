@@ -75,9 +75,6 @@ export function createRedisStore(): BugRunStore {
   const url = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL;
   const token = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN;
 
-  console.log("[store] Available env keys:", Object.keys(process.env).filter(k => k.includes("REDIS") || k.includes("KV") || k.includes("UPSTASH")).join(", "));
-  console.log("[store] URL available:", !!url, "Token available:", !!token);
-
   if (!url || !token) {
     console.warn("⚠️ Redis REST credentials not configured - store will fail silently");
   }
