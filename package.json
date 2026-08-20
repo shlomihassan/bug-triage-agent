@@ -24,10 +24,13 @@
     "@upstash/redis": "^1.38.2",
     "@vercel/connect": "^0.4.3",
     "ai": "^7.0.38",
+    "better-sqlite3": "^13.0.3",
     "eve": "^0.30.2",
+    "sqlite-vec": "^0.1.9",
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^26.2.0",
     "typescript": "^7.0.2",
     "vitest": "^4.1.11"
