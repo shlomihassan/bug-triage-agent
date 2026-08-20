@@ -1,6 +1,6 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
-import type Database from "better-sqlite3";
+import type { Database as SqlJsDatabase } from "sql.js";
 import { CODE_INTELLIGENCE_DB_PATH, openCodeIntelligenceDb } from "../lib/code-intelligence-db";
 import { embedTexts } from "../../indexing/embed-semantic";
 
@@ -11,31 +11,49 @@ export interface ChunkMatch {
   score: number;
 }
 
-export function searchChunks(db: Database.Database, queryEmbedding: number[], topK: number): ChunkMatch[] {
-  // First get the nearest chunks by embedding similarity
-  const vecSql = `
-    SELECT rowid, distance
-    FROM chunks_vec
-    WHERE embedding MATCH vec_f32(?)
-    ORDER BY distance
-    LIMIT ?
-  `;
-  const vecResults = db.prepare(vecSql).all(JSON.stringify(queryEmbedding), topK) as Array<{ rowid: number; distance: number }>;
+function cosineSimilarity(a: number[], b: number[]): number {
+  let dotProduct = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dotProduct += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+}
 
-  // Then join with chunks table to get full metadata
-  const chunkSql = `
-    SELECT file_path AS filePath, start_line AS startLine, end_line AS endLine
-    FROM chunks
-    WHERE rowid = ?
-  `;
-  const getChunk = db.prepare(chunkSql);
+export function searchChunks(db: SqlJsDatabase, queryEmbedding: number[], topK: number): ChunkMatch[] {
+  // Load all embeddings and compute similarity scores
+  const result = db.exec(`
+    SELECT rowid, embedding FROM chunks_vec
+  `);
 
-  return vecResults
-    .map((result) => {
-      const chunk = getChunk.get(result.rowid) as { filePath: string; startLine: number; endLine: number } | undefined;
-      return chunk ? { ...chunk, score: result.distance } : null;
-    })
-    .filter((r): r is ChunkMatch => r !== null);
+  if (!result.length) return [];
+
+  const rows = result[0].values as Array<[number, string]>;
+  const similarities = rows.map(([rowid, embeddingJson]) => {
+    const embedding = JSON.parse(embeddingJson);
+    return { rowid, score: cosineSimilarity(queryEmbedding, embedding) };
+  });
+
+  // Sort by similarity and get top K
+  const topResults = similarities.sort((a, b) => b.score - a.score).slice(0, topK);
+
+  // Get chunk metadata for top results
+  const chunks: ChunkMatch[] = [];
+  for (const { rowid, score } of topResults) {
+    const result = db.exec(`
+      SELECT file_path, start_line, end_line FROM chunks WHERE rowid = ?
+    `, [rowid]);
+
+    if (result.length && result[0].values.length) {
+      const [filePath, startLine, endLine] = result[0].values[0] as [string, number, number];
+      chunks.push({ filePath, startLine, endLine, score });
+    }
+  }
+
+  return chunks;
 }
 
 const DB_PATH = CODE_INTELLIGENCE_DB_PATH;
@@ -52,9 +70,9 @@ export default defineTool({
     if (!apiKey) {
       return { matches: [], note: "VOYAGE_API_KEY not configured; fall back to grep/read" };
     }
-    let db: Database.Database;
+    let db: SqlJsDatabase;
     try {
-      db = openCodeIntelligenceDb(DB_PATH, { readonly: true });
+      db = await openCodeIntelligenceDb(DB_PATH, { readonly: true });
     } catch {
       return { matches: [], note: "code-intelligence.sqlite not available; fall back to grep/read" };
     }
@@ -63,8 +81,6 @@ export default defineTool({
       return { matches: searchChunks(db, queryEmbedding, topK) };
     } catch {
       return { matches: [], note: "embedding request failed; fall back to grep/read" };
-    } finally {
-      db.close();
     }
   },
 });

@@ -1,6 +1,6 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
-import type Database from "better-sqlite3";
+import type { Database as SqlJsDatabase } from "sql.js";
 import { CODE_INTELLIGENCE_DB_PATH, openCodeIntelligenceDb } from "../lib/code-intelligence-db";
 
 export interface RelatedSymbol {
@@ -18,7 +18,7 @@ export interface QueryResult {
 }
 
 export function findRelatedSymbols(
-  db: Database.Database,
+  db: SqlJsDatabase,
   input: { symbolName: string; direction: "callers" | "callees"; depth: number; file?: string },
 ): QueryResult {
   // Check for ambiguous symbol names, applying file filter if provided
@@ -30,9 +30,20 @@ export function findRelatedSymbols(
     ambiguityParams.push(input.file);
   }
 
-  const ambiguousCheck = db
-    .prepare(ambiguityQuery)
-    .all(...ambiguityParams) as Array<{ name: string; file: string; start_line: number; end_line: number }>;
+  const ambiguityResult = db.exec(ambiguityQuery, ambiguityParams);
+  const ambiguousCheck: Array<{ name: string; file: string; start_line: number; end_line: number }> = [];
+
+  if (ambiguityResult.length && ambiguityResult[0].values.length) {
+    const columns = ambiguityResult[0].columns;
+    ambiguousCheck.push(
+      ...ambiguityResult[0].values.map((row) => ({
+        name: row[columns.indexOf("name")] as string,
+        file: row[columns.indexOf("file")] as string,
+        start_line: row[columns.indexOf("start_line")] as number,
+        end_line: row[columns.indexOf("end_line")] as number,
+      })),
+    );
+  }
 
   if (ambiguousCheck.length > 1) {
     const candidateDesc = input.file
@@ -82,7 +93,22 @@ export function findRelatedSymbols(
   `;
 
   params.push(input.depth);
-  const matches = db.prepare(sql).all(...params) as RelatedSymbol[];
+  const result = db.exec(sql, params);
+  const matches: RelatedSymbol[] = [];
+
+  if (result.length && result[0].values.length) {
+    const columns = result[0].columns;
+    matches.push(
+      ...result[0].values.map((row) => ({
+        symbol: row[columns.indexOf("symbol")] as string,
+        file: row[columns.indexOf("file")] as string,
+        startLine: row[columns.indexOf("startLine")] as number,
+        endLine: row[columns.indexOf("endLine")] as number,
+        hops: row[columns.indexOf("hops")] as number,
+      })),
+    );
+  }
+
   return { matches };
 }
 
@@ -124,17 +150,17 @@ export default defineTool({
   inputSchema,
   outputSchema,
   async execute({ symbolName, direction, depth, file }) {
-    let db: Database.Database;
+    let db: SqlJsDatabase;
     try {
-      db = openCodeIntelligenceDb(DB_PATH, { readonly: true });
+      db = await openCodeIntelligenceDb(DB_PATH, { readonly: true });
     } catch {
       return { matches: [], note: "code-intelligence.sqlite not available; fall back to grep/read" };
     }
     try {
       const result = findRelatedSymbols(db, { symbolName, direction, depth, file });
       return result;
-    } finally {
-      db.close();
+    } catch {
+      return { matches: [], note: "Query failed; fall back to grep/read" };
     }
   },
 });
