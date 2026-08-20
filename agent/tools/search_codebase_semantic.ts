@@ -69,18 +69,27 @@ export default defineTool({
   async execute({ query, topK }) {
     const apiKey = process.env.VOYAGE_API_KEY;
     if (!apiKey) {
+      console.log("VOYAGE_API_KEY not configured");
       return { matches: [], note: "VOYAGE_API_KEY not configured; fall back to grep/read" };
     }
     let db: SqlJsDatabase;
     try {
+      console.log(`Opening database from ${DB_PATH}`);
       db = await openCodeIntelligenceDb(DB_PATH, { readonly: true });
-    } catch {
+      console.log("Database opened successfully");
+    } catch (err) {
+      console.error("Failed to open database:", err);
       return { matches: [], note: "code-intelligence.sqlite not available; fall back to grep/read" };
     }
     try {
+      console.log(`Embedding query: "${query}"`);
       const [queryEmbedding] = await embedTexts([query], apiKey);
-      return { matches: searchChunks(db, queryEmbedding, topK) };
-    } catch {
+      console.log("Query embedding successful, searching chunks...");
+      const results = searchChunks(db, queryEmbedding, topK);
+      console.log(`Search returned ${results.length} results`);
+      return { matches: results };
+    } catch (err) {
+      console.error("Search failed:", err);
       return { matches: [], note: "embedding request failed; fall back to grep/read" };
     }
   },

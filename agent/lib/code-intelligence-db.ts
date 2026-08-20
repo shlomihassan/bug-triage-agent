@@ -16,6 +16,11 @@ async function getSqlJs() {
 
 export async function openCodeIntelligenceDb(path: string, _options?: { readonly?: boolean }): Promise<SqlJsDatabase> {
   const SQL = await getSqlJs();
-  const fileBuffer = readFileSync(path);
-  return new SQL.Database(fileBuffer);
+  try {
+    const fileBuffer = readFileSync(path);
+    return new SQL.Database(fileBuffer);
+  } catch (err) {
+    console.error(`Failed to load database from ${path}:`, err);
+    throw err;
+  }
 }
