@@ -32,8 +32,7 @@ export function upsertChunks(
   const insertChunk = db.prepare(
     "INSERT INTO chunks (id, symbol_id, file_path, start_line, end_line, language, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?)",
   );
-  const insertVec = db.prepare("INSERT INTO chunks_vec (embedding) VALUES (vec_f32(?))");
-  const getLastVecRowid = db.prepare("SELECT last_insert_rowid() as rowid");
+  const getChunkRowid = db.prepare("SELECT rowid FROM chunks WHERE id = ?");
 
   const upsertOne = db.transaction((chunk: { symbol: Symbol; text: string; embedding: number[] }) => {
     const contentHash = hashContent(chunk.text);
@@ -53,7 +52,12 @@ export function upsertChunks(
       chunk.symbol.language,
       contentHash,
     );
-    insertVec.run(JSON.stringify(chunk.embedding));
+    // Explicitly read back the actual assigned rowid to ensure explicit linkage with chunks_vec
+    const rowidResult = getChunkRowid.get(chunkId) as { rowid: number | bigint };
+    const newRowid = Number(rowidResult.rowid);
+    // Use raw SQL to explicitly set the rowid for the virtual table
+    const embeddingJson = JSON.stringify(chunk.embedding).replace(/'/g, "''");
+    db.exec(`INSERT INTO chunks_vec (rowid, embedding) VALUES (${newRowid}, vec_f32('${embeddingJson}'))`);
   });
 
   for (const chunk of chunks) upsertOne(chunk);
