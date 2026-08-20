@@ -22,19 +22,26 @@ export function findRelatedSymbols(
   db: Database.Database,
   input: { symbolName: string; direction: "callers" | "callees"; depth: number; file?: string },
 ): QueryResult {
-  // Check for ambiguous symbol names (multiple symbols with same name in different files)
-  const ambiguousCheck = db
-    .prepare(
-      `
-    SELECT DISTINCT name, file, start_line, end_line FROM symbols WHERE name = ?
-    `,
-    )
-    .all(input.symbolName) as Array<{ name: string; file: string; start_line: number; end_line: number }>;
+  // Check for ambiguous symbol names, applying file filter if provided
+  let ambiguityQuery = `SELECT DISTINCT name, file, start_line, end_line FROM symbols WHERE name = ?`;
+  const ambiguityParams: (string | number)[] = [input.symbolName];
 
-  if (ambiguousCheck.length > 1 && !input.file) {
+  if (input.file) {
+    ambiguityQuery += ` AND file = ?`;
+    ambiguityParams.push(input.file);
+  }
+
+  const ambiguousCheck = db
+    .prepare(ambiguityQuery)
+    .all(...ambiguityParams) as Array<{ name: string; file: string; start_line: number; end_line: number }>;
+
+  if (ambiguousCheck.length > 1) {
+    const candidateDesc = input.file
+      ? `(${ambiguousCheck.length} symbols with same name in file "${input.file}", distinguished by line numbers)`
+      : `(${ambiguousCheck.length} symbols found in different files)`;
     return {
       matches: [],
-      note: `Symbol name "${input.symbolName}" is ambiguous (${ambiguousCheck.length} symbols found in different files). Please provide a file to disambiguate.`,
+      note: `Symbol name "${input.symbolName}" is ambiguous ${candidateDesc}. Please provide ${input.file ? "start and end line numbers to" : "a file to"} disambiguate.`,
       ambiguousCandidates: ambiguousCheck.map((c) => ({
         name: c.name,
         file: c.file,
