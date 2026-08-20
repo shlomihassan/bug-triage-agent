@@ -71,11 +71,15 @@ export function createMemoryStore(): BugRunStore {
 }
 
 export function createRedisStore(): BugRunStore {
-  const redis = Redis.fromEnv();
+  // Support both Upstash and Vercel KV env vars
+  const url = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL;
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN;
 
-  if (!process.env.UPSTASH_REDIS_REST_URL || !process.env.UPSTASH_REDIS_REST_TOKEN) {
-    console.warn("⚠️ Upstash Redis REST credentials not configured - store will fail silently");
+  if (!url || !token) {
+    console.warn("⚠️ Redis REST credentials not configured - store will fail silently");
   }
+
+  const redis = new Redis({ url, token });
 
 
   return {
