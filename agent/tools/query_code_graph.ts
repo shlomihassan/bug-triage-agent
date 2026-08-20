@@ -1,7 +1,6 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
-import type { Database as SqlJsDatabase } from "sql.js";
-import { CODE_INTELLIGENCE_DB_PATH, openCodeIntelligenceDb } from "../lib/code-intelligence-db";
+import { createNeonDb, table } from "../lib/neon-db";
 
 export interface RelatedSymbol {
   symbol: string;
@@ -17,33 +16,27 @@ export interface QueryResult {
   ambiguousCandidates?: Array<{ name: string; file: string; startLine: number; endLine: number }>;
 }
 
-export function findRelatedSymbols(
-  db: SqlJsDatabase,
+async function findRelatedSymbols(
   input: { symbolName: string; direction: "callers" | "callees"; depth: number; file?: string },
-): QueryResult {
+): Promise<QueryResult> {
+  const db = createNeonDb();
+
   // Check for ambiguous symbol names, applying file filter if provided
-  let ambiguityQuery = `SELECT DISTINCT name, file, start_line, end_line FROM symbols WHERE name = ?`;
-  const ambiguityParams: (string | number)[] = [input.symbolName];
+  let ambiguityQuery = `SELECT DISTINCT name, file, start_line, end_line FROM ${table("symbols")} WHERE name = $1`;
+  const ambiguityParams: any[] = [input.symbolName];
 
   if (input.file) {
-    ambiguityQuery += ` AND file = ?`;
+    ambiguityQuery += ` AND file = $2`;
     ambiguityParams.push(input.file);
   }
 
-  const ambiguityStmt = db.prepare(ambiguityQuery);
-  ambiguityStmt.bind(ambiguityParams);
-  const ambiguousCheck: Array<{ name: string; file: string; start_line: number; end_line: number }> = [];
-
-  while (ambiguityStmt.step()) {
-    const row = ambiguityStmt.getAsObject() as {
-      name: string;
-      file: string;
-      start_line: number;
-      end_line: number;
-    };
-    ambiguousCheck.push(row);
-  }
-  ambiguityStmt.free();
+  const ambiguityResult = await db.query(ambiguityQuery, ambiguityParams);
+  const ambiguousCheck = ambiguityResult.rows.map((row) => ({
+    name: row.name as string,
+    file: row.file as string,
+    start_line: row.start_line as number,
+    end_line: row.end_line as number,
+  }));
 
   if (ambiguousCheck.length > 1) {
     const candidateDesc = input.file
@@ -64,55 +57,47 @@ export function findRelatedSymbols(
   const edgeDirection = input.direction === "callers" ? "to_symbol_id" : "from_symbol_id";
   const targetDirection = input.direction === "callers" ? "from_symbol_id" : "to_symbol_id";
 
-  let whereClause = "WHERE s.name = ?";
-  const params: (string | number)[] = [input.symbolName];
+  let paramIndex = 1;
+  let whereClause = `WHERE s.name = $${paramIndex++}`;
+  const params: any[] = [input.symbolName];
 
   if (input.file) {
-    whereClause += " AND s.file = ?";
+    whereClause += ` AND s.file = $${paramIndex++}`;
     params.push(input.file);
   }
 
   const sql = `
     WITH RECURSIVE related(id, hops) AS (
       SELECT s.id, 0
-      FROM symbols s
+      FROM ${table("symbols")} s
       ${whereClause}
       UNION
       SELECT e.${targetDirection}, related.hops + 1
-      FROM edges e
+      FROM ${table("edges")} e
       JOIN related ON e.${edgeDirection} = related.id
-      WHERE related.hops < ?
+      WHERE related.hops < $${paramIndex}
     )
     SELECT DISTINCT sym.name AS symbol, sym.file AS file, sym.start_line AS startLine,
            sym.end_line AS endLine, MIN(related.hops) AS hops
     FROM related
-    JOIN symbols sym ON sym.id = related.id
+    JOIN ${table("symbols")} sym ON sym.id = related.id
     WHERE related.hops > 0
     GROUP BY sym.id
     ORDER BY hops ASC, sym.name ASC
   `;
 
   params.push(input.depth);
-  const stmt = db.prepare(sql);
-  stmt.bind(params);
-  const matches: RelatedSymbol[] = [];
-
-  while (stmt.step()) {
-    const row = stmt.getAsObject() as {
-      symbol: string;
-      file: string;
-      startLine: number;
-      endLine: number;
-      hops: number;
-    };
-    matches.push(row);
-  }
-  stmt.free();
+  const result = await db.query(sql, params);
+  const matches: RelatedSymbol[] = result.rows.map((row) => ({
+    symbol: row.symbol as string,
+    file: row.file as string,
+    startLine: row.startline as number,
+    endLine: row.endline as number,
+    hops: row.hops as number,
+  }));
 
   return { matches };
 }
-
-const DB_PATH = CODE_INTELLIGENCE_DB_PATH;
 
 const inputSchema = z.object({
   symbolName: z.string().describe("The function or method name to look up, e.g. 'CanDelete'"),
@@ -150,16 +135,15 @@ export default defineTool({
   inputSchema,
   outputSchema,
   async execute({ symbolName, direction, depth, file }) {
-    let db: SqlJsDatabase;
-    try {
-      db = await openCodeIntelligenceDb(DB_PATH, { readonly: true });
-    } catch {
-      return { matches: [], note: "code-intelligence.sqlite not available; fall back to grep/read" };
+    if (!process.env.DATABASE_URL_UNPOOLED) {
+      return { matches: [], note: "Code intelligence database not configured; fall back to grep/read" };
     }
+
     try {
-      const result = findRelatedSymbols(db, { symbolName, direction, depth, file });
+      const result = await findRelatedSymbols({ symbolName, direction, depth, file });
       return result;
-    } catch {
+    } catch (err) {
+      console.error("Query failed:", err);
       return { matches: [], note: "Query failed; fall back to grep/read" };
     }
   },
