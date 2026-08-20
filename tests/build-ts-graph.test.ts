@@ -27,6 +27,83 @@ describe("extractTsGraph", () => {
     });
   });
 
+  it("extracts function symbols and call edges from a .js file", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ts-graph-js-test-"));
+    const filePath = join(dir, "sample.js");
+    writeFileSync(
+      filePath,
+      "function helper() {\n  return 1;\n}\n\nfunction caller() {\n  return helper();\n}\n",
+    );
+
+    const { symbols, edges } = extractTsGraph([filePath]);
+
+    const names = symbols.map((s) => s.name);
+    expect(names).toEqual(expect.arrayContaining(["helper", "caller"]));
+
+    const callerSymbol = symbols.find((s) => s.name === "caller")!;
+    const helperSymbol = symbols.find((s) => s.name === "helper")!;
+    expect(edges).toContainEqual({
+      fromSymbolId: callerSymbol.id,
+      toSymbolId: helperSymbol.id,
+      kind: "calls",
+    });
+    // The Symbol.language enum (Task 1's schema) has no separate "javascript" value --
+    // .js files are classified the same as .ts ("typescript") by languageForFile().
+    expect(callerSymbol.language).toBe("typescript");
+    expect(helperSymbol.language).toBe("typescript");
+  });
+
+  it("extracts a class method as a `method` symbol, called from another top-level function", () => {
+    // Covers the MethodDeclaration extraction path, which had zero test coverage.
+    // Note: call resolution only matches bare identifier call expressions
+    // (`call.getExpression().getText()`), so a property/method-access call like
+    // `g.greet()` does NOT produce a `calls` edge -- that's a known, accepted
+    // limitation of this task's bare-name matching (not something this test asserts
+    // against or that this task is fixing). This test only asserts that the method
+    // SYMBOL itself is captured with the right shape.
+    const dir = mkdtempSync(join(tmpdir(), "ts-graph-method-test-"));
+    const filePath = join(dir, "sample.ts");
+    writeFileSync(
+      filePath,
+      [
+        "class Greeter {",
+        "  greet(): string {",
+        '    return "hi";',
+        "  }",
+        "}",
+        "",
+        "function run(): string {",
+        "  const g = new Greeter();",
+        "  return g.greet();",
+        "}",
+        "",
+      ].join("\n"),
+    );
+
+    const { symbols, edges } = extractTsGraph([filePath]);
+
+    const greetSymbol = symbols.find((s) => s.name === "greet");
+    expect(greetSymbol).toBeDefined();
+    expect(greetSymbol).toMatchObject({
+      name: "greet",
+      kind: "method",
+      file: filePath,
+      language: "typescript",
+    });
+    expect(greetSymbol!.startLine).toBeGreaterThan(0);
+    expect(greetSymbol!.endLine).toBeGreaterThanOrEqual(greetSymbol!.startLine);
+
+    const runSymbol = symbols.find((s) => s.name === "run");
+    expect(runSymbol).toBeDefined();
+    expect(runSymbol!.kind).toBe("function");
+
+    // Expected/accepted: no edge for the `g.greet()` call, since it's not a bare
+    // identifier call expression.
+    expect(edges).not.toContainEqual(
+      expect.objectContaining({ fromSymbolId: runSymbol!.id, toSymbolId: greetSymbol!.id }),
+    );
+  });
+
   it("extracts symbols from a .vue file's <script setup> block", () => {
     const dir = mkdtempSync(join(tmpdir(), "ts-graph-vue-test-"));
     const filePath = join(dir, "Sample.vue");
