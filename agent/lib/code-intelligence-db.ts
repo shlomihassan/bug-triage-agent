@@ -13,7 +13,8 @@ import { SCHEMA_SQL, vecTableSql } from "./code-intelligence-schema";
  * within "lib/"`. A top-level `data/` directory sits outside the agent root, so discovery
  * ignores it while `vercel deploy` still uploads it with the rest of the project.
  */
-export const CODE_INTELLIGENCE_DB_PATH = join(process.cwd(), "data/code-intelligence.sqlite");
+export const CODE_INTELLIGENCE_DB_PATH =
+  process.env.CODE_INTELLIGENCE_DB_PATH ?? join(process.cwd(), "data/code-intelligence.sqlite");
 
 export function openCodeIntelligenceDb(path: string, options?: { readonly?: boolean }): Database.Database {
   const db = new Database(path, { readonly: options?.readonly ?? false, fileMustExist: options?.readonly ?? false });
