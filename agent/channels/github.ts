@@ -8,14 +8,19 @@ export default githubChannel({
   // inbound webhook verification, so no GITHUB_APP_ID/PRIVATE_KEY/WEBHOOK_SECRET here.
   credentials: connectGitHubCredentials("github/bug-triage-agent"),
   onIssue: (ctx, issue) => {
+    console.log(`[github] 🔔 Webhook received for issue #${issue.issueNumber}: action=${issue.action}`);
     // "reopened" is included deliberately, not just for testing convenience: a human reopening
     // a bug ("actually this isn't fixed") is a legitimate reason to re-triage it, the same as a
     // freshly opened one.
-    if (issue.action !== "opened" && issue.action !== "reopened") return null;
+    if (issue.action !== "opened" && issue.action !== "reopened") {
+      console.log(`[github] ⏭️  Skipping - action not opened/reopened`);
+      return null;
+    }
     // The dispatch context (GitHubConversationRef: issueNumber/kind/pullRequestNumber) has no
     // session id yet — the session doesn't exist until eve dispatches this turn. The run's
     // tracking record is created lazily inside classify_severity (Task 10), the first tool call
     // in the flow, once ctx.session.id is actually available; see the createRun note in Task 8.
+    console.log(`[github] ✅ Dispatching issue #${issue.issueNumber} to agent`);
     return { auth: defaultGitHubAuth(ctx) };
   },
 });

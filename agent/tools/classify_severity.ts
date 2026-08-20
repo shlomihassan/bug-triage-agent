@@ -18,7 +18,9 @@ const inputSchema = z.object({
   reproTestPassed: z.boolean(),
 });
 
+console.log(`[tools] 📦 Loading classify_severity tool`);
 const store = createRedisStore();
+console.log(`[tools] ✅ classify_severity tool loaded`);
 
 export default defineTool({
   description:

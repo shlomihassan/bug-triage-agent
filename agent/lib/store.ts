@@ -75,11 +75,13 @@ export function createRedisStore(): BugRunStore {
   const url = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL;
   const token = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN;
 
+  console.log(`[store] 🔌 Initializing Redis store: URL=${!!url} Token=${!!token}`);
   if (!url || !token) {
-    console.warn("⚠️ Redis REST credentials not configured - store will fail silently");
+    console.error("❌ [store] Redis REST credentials not configured - store will fail!");
   }
 
   const redis = new Redis({ url, token });
+  console.log(`[store] ✅ Redis client created`);
 
 
   return {
