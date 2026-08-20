@@ -55,47 +55,34 @@ func main() {
 		fmt.Fprintln(os.Stderr, "package errors above are non-fatal; continuing")
 	}
 
-	prog, ssaPkgs := ssautil.AllPackages(pkgs, 0)
+	prog, _ := ssautil.AllPackages(pkgs, 0)
 	prog.Build()
 
 	symbolsByFunc := map[*ssa.Function]string{}
-	var symbols []Symbol
+	symbols := []Symbol{}
 	fset := prog.Fset
 
-	for _, ssaPkg := range ssaPkgs {
-		if ssaPkg == nil {
+	for fn := range ssautil.AllFunctions(prog) {
+		if fn == nil || fn.Syntax() == nil {
 			continue
 		}
-		for _, member := range ssaPkg.Members {
-			fn, ok := member.(*ssa.Function)
-			if !ok || fn.Syntax() == nil {
-				continue
-			}
-			pos := fset.Position(fn.Pos())
-			endPos := fset.Position(fn.Syntax().End())
-			id := fmt.Sprintf("%s:%s:%d", pos.Filename, fn.Name(), pos.Line)
-			symbolsByFunc[fn] = id
-			symbols = append(symbols, Symbol{
-				ID: id, Name: fn.Name(), Kind: "function",
-				File: pos.Filename, StartLine: pos.Line, EndLine: endPos.Line,
-				Language: "go",
-			})
-			for _, method := range methodsOf(fn) {
-				mPos := fset.Position(method.Pos())
-				mEndPos := fset.Position(method.Syntax().End())
-				mID := fmt.Sprintf("%s:%s:%d", mPos.Filename, method.Name(), mPos.Line)
-				symbolsByFunc[method] = mID
-				symbols = append(symbols, Symbol{
-					ID: mID, Name: method.Name(), Kind: "method",
-					File: mPos.Filename, StartLine: mPos.Line, EndLine: mEndPos.Line,
-					Language: "go",
-				})
-			}
+		pos := fset.Position(fn.Pos())
+		endPos := fset.Position(fn.Syntax().End())
+		id := fmt.Sprintf("%s:%s:%d", pos.Filename, fn.Name(), pos.Line)
+		kind := "function"
+		if fn.Signature.Recv() != nil {
+			kind = "method"
 		}
+		symbolsByFunc[fn] = id
+		symbols = append(symbols, Symbol{
+			ID: id, Name: fn.Name(), Kind: kind,
+			File: pos.Filename, StartLine: pos.Line, EndLine: endPos.Line,
+			Language: "go",
+		})
 	}
 
 	cg := static.CallGraph(prog)
-	var edges []Edge
+	edges := []Edge{}
 	for fn, node := range cg.Nodes {
 		fromID, ok := symbolsByFunc[fn]
 		if !ok {
@@ -114,11 +101,4 @@ func main() {
 		fmt.Fprintln(os.Stderr, "encode error:", err)
 		os.Exit(1)
 	}
-}
-
-// methodsOf returns nothing for package-level functions; ssa surfaces methods via
-// prog.MethodSets / RuntimeTypes rather than package Members. Kept as an explicit
-// no-op seam so method extraction can be added without restructuring main()'s loop.
-func methodsOf(fn *ssa.Function) []*ssa.Function {
-	return nil
 }
