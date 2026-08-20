@@ -75,10 +75,7 @@ export default githubChannel({
     // session id yet — the session doesn't exist until eve dispatches this turn. The run's
     // tracking record is created lazily inside classify_severity (Task 10), the first tool call
     // in the flow, once ctx.session.id is actually available; see the createRun note in Task 8.
-    console.log(`[github] ✅ Dispatching issue #${issue.issueNumber} to agent with instructions context`);
-    return {
-      auth: defaultGitHubAuth(ctx),
-      context: INSTRUCTIONS ? [INSTRUCTIONS] : undefined,
-    };
+    console.log(`[github] ✅ Dispatching issue #${issue.issueNumber} to agent`);
+    return { auth: defaultGitHubAuth(ctx) };
   },
 });
