@@ -1,6 +1,12 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { existsSync, unlinkSync } from "node:fs";
-import { hashContent, upsertChunks } from "../indexing/embed-semantic";
+import {
+  MAX_CHUNK_CHARS,
+  embedTextsWithUsage,
+  hashContent,
+  truncateForEmbedding,
+  upsertChunks,
+} from "../indexing/embed-semantic";
 import { openCodeIntelligenceDb } from "../agent/lib/code-intelligence-db";
 import type { Symbol } from "../agent/lib/code-intelligence-schema";
 
@@ -23,6 +29,69 @@ describe("hashContent", () => {
     const c = hashContent("func CanDelete() bool { return false }");
     expect(a).toBe(b);
     expect(a).not.toBe(c);
+  });
+});
+
+describe("truncateForEmbedding", () => {
+  it("leaves normal-sized symbols untouched", () => {
+    const text = "func CanDelete() bool { return true }";
+    expect(truncateForEmbedding(text)).toBe(text);
+  });
+
+  it("caps oversized symbols so one input can never exceed a minute's token budget", () => {
+    const huge = "x".repeat(MAX_CHUNK_CHARS * 4);
+    expect(truncateForEmbedding(huge).length).toBe(MAX_CHUNK_CHARS);
+  });
+});
+
+describe("embedTextsWithUsage", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+
+  it("splits oversized input across requests and sums the token usage the API reports", async () => {
+    // Generous limits so the pacer does not actually sleep during the test.
+    vi.stubEnv("VOYAGE_RPM", "1000");
+    vi.stubEnv("VOYAGE_TPM", "6000");
+    // 6000 TPM / 1000 RPM would be tiny, so the floor is one max-size chunk (2000 tokens);
+    // each 3000-char text is ~1000 estimated tokens, so two texts fit per request.
+    const bodies: unknown[] = [];
+    const fetchMock = vi.fn(async (_url: string, init: { body: string }) => {
+      const parsed = JSON.parse(init.body) as { input: string[] };
+      bodies.push(parsed.input.length);
+      return {
+        ok: true,
+        json: async () => ({
+          data: parsed.input.map(() => ({ embedding: new Array(1024).fill(0.5) })),
+          usage: { total_tokens: 100 },
+        }),
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const texts = new Array(6).fill("y".repeat(3000));
+    const result = await embedTextsWithUsage(texts, "test-key");
+
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(1);
+    expect(result.embeddings).toHaveLength(6);
+    // One embedding per input, and usage summed across every request that was made.
+    expect(result.totalTokens).toBe(100 * fetchMock.mock.calls.length);
+    expect(bodies.reduce((a, b) => (a as number) + (b as number), 0)).toBe(6);
+  });
+
+  it("fails fast on a non-retryable error instead of burning the retry budget", async () => {
+    vi.stubEnv("VOYAGE_RPM", "1000");
+    vi.stubEnv("VOYAGE_TPM", "1000000");
+    const fetchMock = vi.fn(async () => ({
+      ok: false,
+      status: 401,
+      text: async () => "unauthorized",
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(embedTextsWithUsage(["hello"], "bad-key")).rejects.toThrow(/401/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 

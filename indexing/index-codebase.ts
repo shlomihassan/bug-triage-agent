@@ -11,14 +11,34 @@
 // agent/tools/query_code_graph.ts and agent/tools/search_codebase_semantic.ts).
 import { execFileSync } from "node:child_process";
 import { readFileSync, globSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { openCodeIntelligenceDb } from "../agent/lib/code-intelligence-db";
 import { extractTsGraph } from "./build-ts-graph";
-import { embedTexts, upsertChunks } from "./embed-semantic";
+import { embedTextsWithUsage, hashContent, truncateForEmbedding, upsertChunks } from "./embed-semantic";
 import type { Symbol, Edge } from "../agent/lib/code-intelligence-schema";
 
+/**
+ * Both extractors emit absolute paths from the machine that ran the index. The agent, at
+ * runtime, works inside a sandbox where the same repo is checked out at `/workspace`, so
+ * an index full of `/Users/<someone>/projects/vikunja/...` paths hands the model file
+ * locations that do not exist there — every grep/read follow-up on a search hit would
+ * fail. Store repo-relative paths (`pkg/models/...`, `frontend/src/...`) instead, which
+ * are valid against any checkout, and rebuild the symbol ids to match so ids stay stable
+ * across machines.
+ */
+function toRepoRelative(symbols: Symbol[], repoRoot: string): { symbols: Symbol[]; idMap: Map<string, string> } {
+  const idMap = new Map<string, string>();
+  const rewritten = symbols.map((s) => {
+    const file = relative(repoRoot, s.file);
+    const id = `${file}:${s.name}:${s.startLine}`;
+    idMap.set(s.id, id);
+    return { ...s, id, file };
+  });
+  return { symbols: rewritten, idMap };
+}
+
 async function main() {
-  const repoPath = process.argv[2];
+  const repoPath = process.argv[2] && resolve(process.argv[2]);
   const apiKey = process.env.VOYAGE_API_KEY;
   if (!repoPath) {
     console.error("usage: tsx indexing/index-codebase.ts <path-to-vikunja-clone>");
@@ -41,8 +61,25 @@ async function main() {
   const tsFiles = globSync(join(repoPath, "frontend/src/**/*.{ts,js,vue}"));
   const tsGraph = extractTsGraph(tsFiles);
 
-  const allSymbols = [...goGraph.symbols, ...tsGraph.symbols];
-  const allEdges = [...goGraph.edges, ...tsGraph.edges];
+  const { symbols: allSymbols, idMap } = toRepoRelative(
+    [...goGraph.symbols, ...tsGraph.symbols],
+    repoPath,
+  );
+  const rawEdges = [...goGraph.edges, ...tsGraph.edges];
+  // Drop edges whose endpoints were never emitted as symbols (e.g. a callee outside the
+  // indexed tree) rather than writing dangling ids the graph query can never resolve.
+  const allEdges: Edge[] = [];
+  let droppedEdges = 0;
+  for (const e of rawEdges) {
+    const from = idMap.get(e.fromSymbolId);
+    const to = idMap.get(e.toSymbolId);
+    if (!from || !to) {
+      droppedEdges++;
+      continue;
+    }
+    allEdges.push({ fromSymbolId: from, toSymbolId: to, kind: e.kind });
+  }
+  if (droppedEdges > 0) console.log(`  (dropped ${droppedEdges} edges with unresolvable endpoints)`);
 
   const dbPath = join(process.cwd(), "agent/lib/code-intelligence.sqlite");
   const db = openCodeIntelligenceDb(dbPath);
@@ -61,23 +98,65 @@ async function main() {
   writeGraph();
 
   console.log("Embedding symbol source chunks (this calls the Voyage AI API)...");
+  // Symbols are grouped by file, so many consecutive symbols come from the same source
+  // file; re-reading and re-splitting it per symbol meant thousands of redundant reads of
+  // the same file across the real tree.
+  const lineCache = new Map<string, string[]>();
+  const linesOf = (relPath: string): string[] => {
+    let lines = lineCache.get(relPath);
+    if (!lines) {
+      lines = readFileSync(join(repoPath, relPath), "utf8").split("\n");
+      lineCache.set(relPath, lines);
+    }
+    return lines;
+  };
+
+  const sourceOf = (s: Symbol) =>
+    truncateForEmbedding(linesOf(s.file).slice(s.startLine - 1, s.endLine).join("\n"));
+
+  // upsertChunks already skips a symbol whose content hash is unchanged — but only AFTER
+  // its embedding has been paid for. On an unpaid Voyage key (3 RPM / 10k TPM) a full
+  // index takes over an hour, so a restart that re-embedded everything would be brutal.
+  // Do the same hash check up front and never send unchanged symbols to the API at all,
+  // which makes the run resumable and makes re-indexing after a few commits nearly free.
+  const existingHashes = new Map<string, string>();
+  for (const row of db.prepare("SELECT symbol_id, content_hash FROM chunks").all() as Array<{
+    symbol_id: string;
+    content_hash: string;
+  }>) {
+    existingHashes.set(row.symbol_id, row.content_hash);
+  }
+  const pending = allSymbols.filter((s) => existingHashes.get(s.id) !== hashContent(sourceOf(s)));
+  const skipped = allSymbols.length - pending.length;
+  if (skipped > 0) console.log(`  ${skipped} symbols already embedded and unchanged; skipping them.`);
+
   const BATCH_SIZE = 100;
-  for (let i = 0; i < allSymbols.length; i += BATCH_SIZE) {
-    const batch = allSymbols.slice(i, i + BATCH_SIZE);
-    const texts = batch.map((s) => {
-      const lines = readFileSync(s.file, "utf8").split("\n");
-      return lines.slice(s.startLine - 1, s.endLine).join("\n");
-    });
-    const embeddings = await embedTexts(texts, apiKey);
+  let totalTokens = 0;
+  let embeddedChunks = 0;
+  for (let i = 0; i < pending.length; i += BATCH_SIZE) {
+    const batch = pending.slice(i, i + BATCH_SIZE);
+    const texts = batch.map(sourceOf);
+    const { embeddings, totalTokens: batchTokens } = await embedTextsWithUsage(texts, apiKey);
+    totalTokens += batchTokens;
     upsertChunks(
       db,
       batch.map((symbol, idx) => ({ symbol, text: texts[idx], embedding: embeddings[idx] })),
     );
-    console.log(`  embedded ${Math.min(i + BATCH_SIZE, allSymbols.length)}/${allSymbols.length}`);
+    embeddedChunks += batch.length;
+    console.log(
+      `  embedded ${Math.min(i + BATCH_SIZE, pending.length)}/${pending.length} (${totalTokens.toLocaleString()} Voyage tokens so far)`,
+    );
   }
 
+  const chunkCount = (db.prepare("SELECT count(*) AS c FROM chunks").get() as { c: number }).c;
+  const symbolCount = (db.prepare("SELECT count(*) AS c FROM symbols").get() as { c: number }).c;
+  const edgeCount = (db.prepare("SELECT count(*) AS c FROM edges").get() as { c: number }).c;
   db.close();
   console.log(`Done. Wrote ${dbPath}`);
+  console.log(
+    `Index contents: ${symbolCount} symbols, ${edgeCount} edges, ${chunkCount} chunks (${embeddedChunks} embedded this run).`,
+  );
+  console.log(`Voyage tokens used this run (reported by the API): ${totalTokens.toLocaleString()}`);
 }
 
 main().catch((err) => {

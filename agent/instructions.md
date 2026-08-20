@@ -18,7 +18,9 @@ don't rediscover file locations or patterns already documented there.
 
 1. Read the issue title and body. Call `search_codebase_semantic` with a description of
    the reported behavior to find candidate files fast, then use `glob`/`grep` to zoom in
-   and confirm — don't read broadly before trying semantic search first.
+   and confirm — don't read broadly before trying semantic search first. Both
+   `search_codebase_semantic` and `query_code_graph` report **repo-relative** paths like
+   `pkg/models/tasks.go`; prefix them with `/workspace/` to read or edit the file.
 2. Reproduce the bug: write a targeted failing test that demonstrates exactly the reported
    behavior.
    - Backend: a Go test in the relevant `pkg/models/*_test.go` file, run with
@@ -51,8 +53,11 @@ don't rediscover file locations or patterns already documented there.
    before 3 genuine attempts.
 3. Once the repro test and full check suite pass, compute the diff stats
    (`git -C /workspace diff --stat main`). For each function/method you changed, call
-   `query_code_graph` with `direction: "callers"` to find its real callers — pass that
-   caller list into your blast-radius reasoning, then call `assess_blast_radius` with the
+   `query_code_graph` with `direction: "callers"` **and the `file` argument set to the
+   repo-relative path you changed** (e.g. `pkg/models/task_attachment_permissions.go`) —
+   permission methods like `CanDelete` are implemented on ~23 different types, and without
+   `file` the tool can only report the ambiguity back to you. Pass the resulting caller
+   list into your blast-radius reasoning, then call `assess_blast_radius` with the
    diff, changed file list, and what you learned about callers.
 4. Commit and push the branch: `git -C /workspace add -A && git -C /workspace
    commit -m "fix: <short description>" && git -C /workspace push origin

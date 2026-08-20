@@ -6,7 +6,8 @@ import (
 	"fmt"
 	"os"
 
-	"golang.org/x/tools/go/callgraph/static"
+	"golang.org/x/tools/go/callgraph/cha"
+	"golang.org/x/tools/go/callgraph/vta"
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
@@ -72,7 +73,9 @@ func main() {
 	symbols := []Symbol{}
 	fset := prog.Fset
 
-	for fn := range ssautil.AllFunctions(prog) {
+	allFuncs := ssautil.AllFunctions(prog)
+
+	for fn := range allFuncs {
 		if fn == nil || fn.Syntax() == nil {
 			continue
 		}
@@ -94,8 +97,20 @@ func main() {
 		})
 	}
 
-	cg := static.CallGraph(prog)
+	// Vikunja dispatches nearly all of its permission checks through interfaces
+	// (web.CRUDable / web.Rights), e.g. handler.DoDelete calls obj.CanDelete(...) on an
+	// interface value. static.CallGraph only resolves *statically* dispatched calls, so
+	// against the real codebase it reported ZERO callers for TaskAttachment.CanDelete and
+	// only 3 callers across all 23 CanDelete implementations — useless for blast radius.
+	//
+	// VTA (variable type analysis), seeded with a CHA call graph, resolves interface
+	// dispatch by tracking which concrete types can actually flow to each call site. On
+	// the real Vikunja pkg/ tree it finds the true caller (handler.DoDelete) while staying
+	// far more precise than CHA alone (~20k in-scope edges vs CHA's ~39k, which links every
+	// interface call to every type implementing the method).
+	cg := vta.CallGraph(allFuncs, cha.CallGraph(prog))
 	edges := []Edge{}
+	seen := map[Edge]bool{}
 	for fn, node := range cg.Nodes {
 		fromID, ok := symbolsByFunc[fn]
 		if !ok {
@@ -106,7 +121,12 @@ func main() {
 			if !ok {
 				continue
 			}
-			edges = append(edges, Edge{FromSymbolID: fromID, ToSymbolID: toID, Kind: "calls"})
+			edge := Edge{FromSymbolID: fromID, ToSymbolID: toID, Kind: "calls"}
+			if seen[edge] {
+				continue
+			}
+			seen[edge] = true
+			edges = append(edges, edge)
 		}
 	}
 
