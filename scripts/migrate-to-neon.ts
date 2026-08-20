@@ -8,8 +8,8 @@ const SCHEMA = "code_intelligence";
 
 async function retryWithBackoff<T>(
   fn: () => Promise<T>,
-  maxRetries = 5,
-  initialDelayMs = 2000,
+  maxRetries = 10,
+  initialDelayMs = 3000,
 ): Promise<T> {
   for (let i = 0; i < maxRetries; i++) {
     try {
@@ -17,7 +17,7 @@ async function retryWithBackoff<T>(
     } catch (err) {
       if (i === maxRetries - 1) throw err;
       const delay = initialDelayMs * Math.pow(2, i);
-      console.log(`Retry ${i + 1}/${maxRetries} after ${delay}ms...`);
+      console.log(`Retry ${i + 1}/${maxRetries} after ${delay}ms (${(delay / 1000).toFixed(1)}s)...`);
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
@@ -165,34 +165,68 @@ async function migrate() {
     );
     if (chunksResult.length) {
       const cols = chunksResult[0].columns;
-      for (const row of chunksResult[0].values) {
-        await pool.query(
-          `INSERT INTO ${SCHEMA}.chunks (id, symbol_id, file_path, start_line, end_line, language, content_hash) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-          [
-            row[cols.indexOf("id")],
-            row[cols.indexOf("symbol_id")],
-            row[cols.indexOf("file_path")],
-            row[cols.indexOf("start_line")],
-            row[cols.indexOf("end_line")],
-            row[cols.indexOf("language")],
-            row[cols.indexOf("content_hash")],
-          ],
+      const chunks = chunksResult[0].values;
+      const batchSize = 500;
+      for (let i = 0; i < chunks.length; i += batchSize) {
+        const batch = chunks.slice(i, i + batchSize);
+        const values = batch
+          .map(
+            (_, idx) =>
+              `($${idx * 7 + 1}, $${idx * 7 + 2}, $${idx * 7 + 3}, $${idx * 7 + 4}, $${idx * 7 + 5}, $${idx * 7 + 6}, $${idx * 7 + 7})`,
+          )
+          .join(",");
+        const params = batch.flatMap((row) => [
+          row[cols.indexOf("id")],
+          row[cols.indexOf("symbol_id")],
+          row[cols.indexOf("file_path")],
+          row[cols.indexOf("start_line")],
+          row[cols.indexOf("end_line")],
+          row[cols.indexOf("language")],
+          row[cols.indexOf("content_hash")],
+        ]);
+        await retryWithBackoff(
+          () =>
+            pool.query(
+              `INSERT INTO ${SCHEMA}.chunks (id, symbol_id, file_path, start_line, end_line, language, content_hash) VALUES ${values} ON CONFLICT (id) DO NOTHING`,
+              params,
+            ),
+          10,
+          3000,
         );
+        console.log(`Migrated chunks batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(chunks.length / batchSize)}`);
       }
-      console.log(`Migrated ${chunksResult[0].values.length} chunks`);
+      console.log(`Migrated ${chunks.length} chunks total`);
     }
 
     console.log("Migrating embeddings...");
     const vecResult = db.exec("SELECT rowid, embedding FROM chunks_vec");
     if (vecResult.length) {
       const cols = vecResult[0].columns;
-      for (const row of vecResult[0].values) {
-        await pool.query(
-          `INSERT INTO ${SCHEMA}.chunks_vec (id, embedding) VALUES ($1, $2)`,
-          [row[cols.indexOf("rowid")], row[cols.indexOf("embedding")]],
+      const embeddings = vecResult[0].values;
+      const batchSize = 500;
+      for (let i = 0; i < embeddings.length; i += batchSize) {
+        const batch = embeddings.slice(i, i + batchSize);
+        const values = batch
+          .map((_, idx) => `($${idx * 2 + 1}, $${idx * 2 + 2})`)
+          .join(",");
+        const params = batch.flatMap((row) => [
+          row[cols.indexOf("rowid")],
+          row[cols.indexOf("embedding")],
+        ]);
+        await retryWithBackoff(
+          () =>
+            pool.query(
+              `INSERT INTO ${SCHEMA}.chunks_vec (id, embedding) VALUES ${values} ON CONFLICT (id) DO NOTHING`,
+              params,
+            ),
+          10,
+          3000,
+        );
+        console.log(
+          `Migrated embeddings batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(embeddings.length / batchSize)}`,
         );
       }
-      console.log(`Migrated ${vecResult[0].values.length} embeddings`);
+      console.log(`Migrated ${embeddings.length} embeddings total`);
     }
 
     console.log("✓ Migration complete!");
