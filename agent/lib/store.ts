@@ -71,11 +71,12 @@ export function createMemoryStore(): BugRunStore {
 }
 
 export function createRedisStore(): BugRunStore {
-  const redis = Redis.fromEnv();
-
-  if (!process.env.REDIS_URL) {
+  const redisUrl = process.env.REDIS_URL;
+  if (!redisUrl) {
     console.warn("⚠️ REDIS_URL not configured - store will fail silently");
   }
+  const redis = new Redis({ url: redisUrl });
+
 
   return {
     async createRun({ runId, issueNumber, issueTitle }) {
