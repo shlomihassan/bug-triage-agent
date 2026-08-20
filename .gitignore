@@ -8,3 +8,11 @@ node_modules
 dist
 .DS_Store
 *.tsbuildinfo
+
+# Dead path for the code-intelligence index. The committed index lives at
+# data/code-intelligence.sqlite -- eve's module discovery fails the build if a binary
+# file sits under the agent root's lib/, so nothing may land here again.
+agent/lib/code-intelligence.sqlite
+# SQLite sidecar files; only the committed .sqlite itself belongs in git.
+*.sqlite-wal
+*.sqlite-shm
