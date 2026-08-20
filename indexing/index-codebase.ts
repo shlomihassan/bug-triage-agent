@@ -58,8 +58,12 @@ async function main() {
   const goGraph = JSON.parse(goOutput) as { symbols: Symbol[]; edges: Edge[] };
 
   console.log("Extracting TS/JS/Vue call graph...");
-  const tsFiles = globSync(join(repoPath, "frontend/src/**/*.{ts,js,vue}"));
-  const tsGraph = extractTsGraph(tsFiles);
+  const frontendSrc = join(repoPath, "frontend/src");
+  const tsFiles = globSync(join(frontendSrc, "**/*.{ts,js,vue}"));
+  // Vikunja's Vite config aliases `@` to `frontend/src` (frontend/vite.config.ts), and
+  // essentially every cross-file import in the frontend uses it, so without this mapping
+  // the TS/Vue call graph collapses to intra-file edges only.
+  const tsGraph = extractTsGraph(tsFiles, { aliases: { "@/": `${frontendSrc}/` } });
 
   const { symbols: allSymbols, idMap } = toRepoRelative(
     [...goGraph.symbols, ...tsGraph.symbols],
@@ -92,6 +96,12 @@ async function main() {
     "INSERT OR IGNORE INTO edges (from_symbol_id, to_symbol_id, kind) VALUES (?, ?, ?)",
   );
   const writeGraph = db.transaction(() => {
+    // Edges are fully re-derived on every run, so clear them first — INSERT OR IGNORE
+    // alone would leave behind edges for calls that have since been deleted from the
+    // codebase, silently inflating every later blast-radius answer. (Symbols are left in
+    // place and upserted: deleting them would orphan the chunks whose content hashes make
+    // re-indexing cheap.)
+    db.prepare("DELETE FROM edges").run();
     for (const s of allSymbols) insertSymbol.run(s.id, s.name, s.kind, s.file, s.startLine, s.endLine, s.language);
     for (const e of allEdges) insertEdge.run(e.fromSymbolId, e.toSymbolId, e.kind);
   });

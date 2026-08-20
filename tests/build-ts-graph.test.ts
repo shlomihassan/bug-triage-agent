@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { writeFileSync, mkdtempSync } from "node:fs";
+import { writeFileSync, mkdtempSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { extractTsGraph } from "../indexing/build-ts-graph";
@@ -189,6 +189,102 @@ describe("extractTsGraph", () => {
       toSymbolId: validateA.id,
       kind: "calls",
     });
+  });
+
+  it("resolves a cross-file call through a relative import", () => {
+    // The real gap this closes: in the Vikunja frontend, getNextWeekDate has exactly one
+    // caller and it lives in a different file (router/index.ts), so an intra-file-only
+    // extractor reported it as having zero callers -- the worst possible answer for a
+    // blast-radius query, since it reads as "safe to change, nothing uses it".
+    const dir = mkdtempSync(join(tmpdir(), "ts-graph-import-test-"));
+    const helperPath = join(dir, "helper.ts");
+    writeFileSync(helperPath, "export function getNextWeekDate(): number { return 7; }\n");
+    const callerPath = join(dir, "caller.ts");
+    writeFileSync(
+      callerPath,
+      ["import {getNextWeekDate} from './helper'", "export function useIt(): number { return getNextWeekDate(); }", ""].join("\n"),
+    );
+
+    const { symbols, edges } = extractTsGraph([callerPath, helperPath]);
+    const helper = symbols.find((s) => s.name === "getNextWeekDate")!;
+    const caller = symbols.find((s) => s.name === "useIt")!;
+    expect(edges).toContainEqual({ fromSymbolId: caller.id, toSymbolId: helper.id, kind: "calls" });
+  });
+
+  it("resolves a cross-file call through a bundler path alias, and ignores third-party imports", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ts-graph-alias-test-"));
+    const srcDir = join(dir, "src");
+    mkdirSync(join(srcDir, "helpers"), { recursive: true });
+    const helperPath = join(srcDir, "helpers", "time.ts");
+    writeFileSync(helperPath, "export function getNextWeekDate(): number { return 7; }\n");
+    const callerPath = join(srcDir, "router.ts");
+    writeFileSync(
+      callerPath,
+      [
+        "import {getNextWeekDate} from '@/helpers/time'",
+        "import {ref} from 'vue'",
+        "export function useIt(): number { return ref(getNextWeekDate()) }",
+        "",
+      ].join("\n"),
+    );
+
+    const { symbols, edges } = extractTsGraph([callerPath, helperPath], {
+      aliases: { "@/": `${srcDir}/` },
+    });
+    const helper = symbols.find((s) => s.name === "getNextWeekDate")!;
+    const caller = symbols.find((s) => s.name === "useIt")!;
+    expect(edges).toContainEqual({ fromSymbolId: caller.id, toSymbolId: helper.id, kind: "calls" });
+    // `ref` comes from a third-party module that isn't part of the indexed tree, so it
+    // must not produce an edge to anything.
+    expect(edges.filter((e) => e.fromSymbolId === caller.id)).toHaveLength(1);
+  });
+
+  it("respects an import alias, mapping the local call name back to the exported name", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ts-graph-rename-test-"));
+    const helperPath = join(dir, "helper.ts");
+    writeFileSync(helperPath, "export function original(): number { return 1; }\n");
+    const callerPath = join(dir, "caller.ts");
+    writeFileSync(
+      callerPath,
+      ["import {original as renamed} from './helper'", "export function useIt(): number { return renamed(); }", ""].join("\n"),
+    );
+
+    const { symbols, edges } = extractTsGraph([callerPath, helperPath]);
+    const helper = symbols.find((s) => s.name === "original")!;
+    const caller = symbols.find((s) => s.name === "useIt")!;
+    expect(edges).toContainEqual({ fromSymbolId: caller.id, toSymbolId: helper.id, kind: "calls" });
+  });
+
+  it("attributes a call to the enclosing function that actually contains it, not a same-named one elsewhere in the file", () => {
+    // Vikunja's router/index.ts declares many `props: route => (...)` arrows. Resolving an
+    // edge's SOURCE by bare name made every one of them collapse onto whichever `props`
+    // was declared last, so the graph blamed a function hundreds of lines from the call.
+    const dir = mkdtempSync(join(tmpdir(), "ts-graph-samename-test-"));
+    const filePath = join(dir, "routes.ts");
+    writeFileSync(
+      filePath,
+      [
+        "function target(): number { return 1; }",
+        "function other(): number { return 2; }",
+        "export const routes = [",
+        "  { props: () => target() },",
+        "  { props: () => other() },",
+        "]",
+        "",
+      ].join("\n"),
+    );
+
+    const { symbols, edges } = extractTsGraph([filePath]);
+    const propsSymbols = symbols.filter((s) => s.name === "props");
+    expect(propsSymbols).toHaveLength(2);
+
+    const target = symbols.find((s) => s.name === "target")!;
+    const callerOfTarget = edges.find((e) => e.toSymbolId === target.id)!;
+    expect(callerOfTarget).toBeDefined();
+    // The edge must come from the FIRST props arrow (the one containing `target()`),
+    // which is the one declared on the earlier line.
+    const firstProps = propsSymbols.reduce((a, b) => (a.startLine <= b.startLine ? a : b));
+    expect(callerOfTarget.fromSymbolId).toBe(firstProps.id);
   });
 
   it("does not create an order-dependent bogus edge when a call name only matches a symbol defined in a DIFFERENT file", () => {
