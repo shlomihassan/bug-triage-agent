@@ -25,14 +25,12 @@ function cosineSimilarity(a: number[], b: number[]): number {
 
 export function searchChunks(db: SqlJsDatabase, queryEmbedding: number[], topK: number): ChunkMatch[] {
   // Load all embeddings and compute similarity scores
-  const result = db.exec(`
-    SELECT rowid, embedding FROM chunks_vec
-  `);
+  const vecResult = db.exec(`SELECT rowid, embedding FROM chunks_vec`);
+  if (!vecResult.length) return [];
 
-  if (!result.length) return [];
-
-  const rows = result[0].values as Array<[number, string]>;
-  const similarities = rows.map(([rowid, embeddingJson]) => {
+  const similarities = vecResult[0].values.map((row) => {
+    const rowid = row[0] as number;
+    const embeddingJson = row[1] as string;
     const embedding = JSON.parse(embeddingJson);
     return { rowid, score: cosineSimilarity(queryEmbedding, embedding) };
   });
@@ -40,18 +38,26 @@ export function searchChunks(db: SqlJsDatabase, queryEmbedding: number[], topK: 
   // Sort by similarity and get top K
   const topResults = similarities.sort((a, b) => b.score - a.score).slice(0, topK);
 
-  // Get chunk metadata for top results
+  // Load all chunks upfront to join with top results
+  const chunkResult = db.exec(`SELECT rowid, file_path, start_line, end_line FROM chunks`);
+  const chunkMap = new Map<number, { filePath: string; startLine: number; endLine: number }>();
+  if (chunkResult.length) {
+    chunkResult[0].values.forEach((row) => {
+      const rowid = row[0] as number;
+      const filePath = row[1] as string;
+      const startLine = row[2] as number;
+      const endLine = row[3] as number;
+      chunkMap.set(rowid, { filePath, startLine, endLine });
+    });
+  }
+
+  // Match top similarity results with chunk metadata
   const chunks: ChunkMatch[] = [];
   for (const { rowid, score } of topResults) {
-    const stmt = db.prepare(`
-      SELECT file_path, start_line, end_line FROM chunks WHERE rowid = ?
-    `);
-    stmt.bind([rowid]);
-    if (stmt.step()) {
-      const row = stmt.getAsObject() as { file_path: string; start_line: number; end_line: number };
-      chunks.push({ filePath: row.file_path, startLine: row.start_line, endLine: row.end_line, score });
+    const chunk = chunkMap.get(rowid);
+    if (chunk) {
+      chunks.push({ ...chunk, score });
     }
-    stmt.free();
   }
 
   return chunks;
