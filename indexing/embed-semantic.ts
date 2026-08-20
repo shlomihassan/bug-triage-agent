@@ -55,9 +55,11 @@ export function upsertChunks(
     // Explicitly read back the actual assigned rowid to ensure explicit linkage with chunks_vec
     const rowidResult = getChunkRowid.get(chunkId) as { rowid: number | bigint };
     const newRowid = Number(rowidResult.rowid);
-    // Use raw SQL to explicitly set the rowid for the virtual table
-    const embeddingJson = JSON.stringify(chunk.embedding).replace(/'/g, "''");
-    db.exec(`INSERT INTO chunks_vec (rowid, embedding) VALUES (${newRowid}, vec_f32('${embeddingJson}'))`);
+    // Note: vec0 (sqlite-vec virtual table) rejects rowid as a bound parameter, so we interpolate it.
+    // The embedding itself is safe to bind via ? since it's validated data (not untrusted).
+    db.prepare(`INSERT INTO chunks_vec (rowid, embedding) VALUES (${newRowid}, vec_f32(?))`).run(
+      JSON.stringify(chunk.embedding),
+    );
   });
 
   for (const chunk of chunks) upsertOne(chunk);
