@@ -1,5 +1,17 @@
 import { connectGitHubCredentials } from "@vercel/connect/eve";
 import { defaultGitHubAuth, githubChannel } from "eve/channels/github";
+import { readFileSync } from "fs";
+import { join } from "path";
+
+// Load agent instructions once at startup
+let INSTRUCTIONS: string;
+try {
+  INSTRUCTIONS = readFileSync(join(import.meta.dirname, "../instructions.md"), "utf-8");
+  console.log(`[github] 📋 Loaded instructions.md (${INSTRUCTIONS.length} chars)`);
+} catch (err) {
+  console.error(`[github] ❌ Failed to load instructions.md:`, err);
+  INSTRUCTIONS = "";
+}
 
 export default githubChannel({
   botName: "bug-triage-agent",
@@ -20,7 +32,10 @@ export default githubChannel({
     // session id yet — the session doesn't exist until eve dispatches this turn. The run's
     // tracking record is created lazily inside classify_severity (Task 10), the first tool call
     // in the flow, once ctx.session.id is actually available; see the createRun note in Task 8.
-    console.log(`[github] ✅ Dispatching issue #${issue.issueNumber} to agent`);
-    return { auth: defaultGitHubAuth(ctx) };
+    console.log(`[github] ✅ Dispatching issue #${issue.issueNumber} to agent with instructions`);
+    return {
+      auth: defaultGitHubAuth(ctx),
+      context: INSTRUCTIONS ? [INSTRUCTIONS] : undefined,
+    };
   },
 });
