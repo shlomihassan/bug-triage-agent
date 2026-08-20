@@ -36,4 +36,22 @@ describe("searchChunks", () => {
     expect(results[0].filePath).toBe("a.go");
     expect(results).toHaveLength(2);
   });
+
+  it("skips results where chunks_vec rowid has no corresponding chunks row (data consistency edge case)", () => {
+    const db = openCodeIntelligenceDb(TEST_DB_PATH);
+    seed(db);
+    // Create an orphaned chunks_vec entry with rowid 99 but no corresponding chunks row
+    const orphanEmbedding = new Array(1024).fill(0);
+    orphanEmbedding[0] = 0.5; // closer to query than chunk B
+    db.prepare("INSERT INTO chunks_vec (rowid, embedding) VALUES (99, vec_f32(?))").run(JSON.stringify(orphanEmbedding));
+
+    const queryEmbedding = new Array(1024).fill(0);
+    queryEmbedding[0] = 1;
+    const results = searchChunks(db, queryEmbedding, 10);
+    db.close();
+
+    // Should return only the 2 valid chunks, skipping the orphaned rowid 99
+    expect(results).toHaveLength(2);
+    expect(results.every((r) => r.filePath && r.startLine !== undefined && r.endLine !== undefined)).toBe(true);
+  });
 });

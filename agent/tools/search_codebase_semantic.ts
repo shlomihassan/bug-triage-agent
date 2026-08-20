@@ -19,9 +19,9 @@ export function searchChunks(db: Database.Database, queryEmbedding: number[], to
     FROM chunks_vec
     WHERE embedding MATCH vec_f32(?)
     ORDER BY distance
-    LIMIT ${topK}
+    LIMIT ?
   `;
-  const vecResults = db.prepare(vecSql).all(JSON.stringify(queryEmbedding)) as Array<{ rowid: number; distance: number }>;
+  const vecResults = db.prepare(vecSql).all(JSON.stringify(queryEmbedding), topK) as Array<{ rowid: number; distance: number }>;
 
   // Then join with chunks table to get full metadata
   const chunkSql = `
@@ -31,13 +31,12 @@ export function searchChunks(db: Database.Database, queryEmbedding: number[], to
   `;
   const getChunk = db.prepare(chunkSql);
 
-  return vecResults.map((result) => {
-    const chunk = getChunk.get(result.rowid) as { filePath: string; startLine: number; endLine: number };
-    return {
-      ...chunk,
-      score: result.distance,
-    };
-  });
+  return vecResults
+    .map((result) => {
+      const chunk = getChunk.get(result.rowid) as { filePath: string; startLine: number; endLine: number } | undefined;
+      return chunk ? { ...chunk, score: result.distance } : null;
+    })
+    .filter((r): r is ChunkMatch => r !== null);
 }
 
 const DB_PATH = join(process.cwd(), "agent/lib/code-intelligence.sqlite");
