@@ -9,6 +9,10 @@ export interface StepCompletedLike {
       readonly costUsd?: number;
       readonly inputTokens?: number;
       readonly outputTokens?: number;
+      readonly inputTokenDetails?: {
+        readonly cacheReadTokens?: number;
+        readonly cacheWriteTokens?: number;
+      };
     };
   };
 }
@@ -30,8 +34,14 @@ export function extractCostRecord(
     // model — this agent calls Anthropic directly via agent/agent.ts, so that field is
     // reliably undefined here. Compute cost ourselves from token counts, the same way the
     // direct-call tools (Tasks 10-12) already do, rather than trust a field this configuration
-    // never fills in.
-    costUsd: calculateCostUsd(model, inputTokens, outputTokens),
+    // never fills in. inputTokenDetails carries the cache read/write split when the underlying
+    // provider reports one, so a session with an active prompt cache (the large, repeated
+    // system instructions + tool defs) is priced at the real, cheaper per-token rate instead of
+    // treating every input token as a fresh, full-price one.
+    costUsd: calculateCostUsd(model, inputTokens, outputTokens, {
+      cacheReadTokens: usage.inputTokenDetails?.cacheReadTokens,
+      cacheWriteTokens: usage.inputTokenDetails?.cacheWriteTokens,
+    }),
     inputTokens,
     outputTokens,
     at: new Date().toISOString(),

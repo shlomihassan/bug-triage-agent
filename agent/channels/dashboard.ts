@@ -1,5 +1,7 @@
-import { defineChannel, GET } from "eve/channels";
+import { defineChannel, GET, POST } from "eve/channels";
 import { createRedisStore, type BugRun } from "../lib/store";
+
+const TERMINAL_STATUSES: BugRun["status"][] = ["pr_opened", "failed"];
 
 const store = createRedisStore();
 
@@ -68,6 +70,11 @@ export default defineChannel({
           </tr>`,
         )
         .join("");
+      const stopButton = TERMINAL_STATUSES.includes(run.status)
+        ? ""
+        : `<form method="post" action="/dashboard/${run.runId}/stop" onsubmit="return confirm('Stop this run now? This cancels the in-flight turn immediately.')">
+            <button type="submit" style="background:#c0392b;color:#fff;border:none;padding:0.5rem 1rem;border-radius:4px;cursor:pointer;">Stop this run</button>
+          </form>`;
       const body = `
         <p><a href="/dashboard">&larr; All runs</a></p>
         <h1>#${run.issueNumber}: ${escapeHtml(run.issueTitle)}</h1>
@@ -76,6 +83,7 @@ export default defineChannel({
       } | Outcome: ${run.outcome ?? "-"}</p>
         <p>${run.prUrl ? `<a href="${escapeHtml(run.prUrl)}">Pull request</a>` : "No PR yet"}</p>
         <p>Total cost: $${totalCost(run).toFixed(4)}</p>
+        ${stopButton}
         <h2>Model calls</h2>
         <table>
           <thead><tr><th>At</th><th>Phase</th><th>Model</th><th>In tokens</th>
@@ -85,6 +93,14 @@ export default defineChannel({
       return new Response(layout(`#${run.issueNumber}`, body), {
         headers: { "content-type": "text/html; charset=utf-8" },
       });
+    }),
+    POST("/dashboard/:runId/stop", async (_req, { params, getSession }) => {
+      const session = getSession(params.runId);
+      await session.cancel();
+      return Response.redirect(
+        new URL(`/dashboard/${params.runId}`, _req.url),
+        303,
+      );
     }),
   ],
 });
