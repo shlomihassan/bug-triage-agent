@@ -71,11 +71,11 @@ export function createMemoryStore(): BugRunStore {
 }
 
 export function createRedisStore(): BugRunStore {
-  const redisUrl = process.env.REDIS_URL;
-  if (!redisUrl) {
-    console.warn("⚠️ REDIS_URL not configured - store will fail silently");
+  const redis = Redis.fromEnv();
+
+  if (!process.env.UPSTASH_REDIS_REST_URL || !process.env.UPSTASH_REDIS_REST_TOKEN) {
+    console.warn("⚠️ Upstash Redis REST credentials not configured - store will fail silently");
   }
-  const redis = new Redis({ url: redisUrl });
 
 
   return {
