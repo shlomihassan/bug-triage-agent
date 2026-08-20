@@ -73,8 +73,8 @@ export function createMemoryStore(): BugRunStore {
 export function createRedisStore(): BugRunStore {
   const redis = Redis.fromEnv();
 
-  if (!process.env.UPSTASH_REDIS_REST_URL || !process.env.UPSTASH_REDIS_REST_TOKEN) {
-    console.warn("⚠️ Redis env vars not configured - store will fail silently");
+  if (!process.env.REDIS_URL) {
+    console.warn("⚠️ REDIS_URL not configured - store will fail silently");
   }
 
   return {
