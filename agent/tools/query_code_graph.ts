@@ -30,20 +30,20 @@ export function findRelatedSymbols(
     ambiguityParams.push(input.file);
   }
 
-  const ambiguityResult = db.exec(ambiguityQuery, ambiguityParams);
+  const ambiguityStmt = db.prepare(ambiguityQuery);
+  ambiguityStmt.bind(ambiguityParams);
   const ambiguousCheck: Array<{ name: string; file: string; start_line: number; end_line: number }> = [];
 
-  if (ambiguityResult.length && ambiguityResult[0].values.length) {
-    const columns = ambiguityResult[0].columns;
-    ambiguousCheck.push(
-      ...ambiguityResult[0].values.map((row) => ({
-        name: row[columns.indexOf("name")] as string,
-        file: row[columns.indexOf("file")] as string,
-        start_line: row[columns.indexOf("start_line")] as number,
-        end_line: row[columns.indexOf("end_line")] as number,
-      })),
-    );
+  while (ambiguityStmt.step()) {
+    const row = ambiguityStmt.getAsObject() as {
+      name: string;
+      file: string;
+      start_line: number;
+      end_line: number;
+    };
+    ambiguousCheck.push(row);
   }
+  ambiguityStmt.free();
 
   if (ambiguousCheck.length > 1) {
     const candidateDesc = input.file
@@ -93,21 +93,21 @@ export function findRelatedSymbols(
   `;
 
   params.push(input.depth);
-  const result = db.exec(sql, params);
+  const stmt = db.prepare(sql);
+  stmt.bind(params);
   const matches: RelatedSymbol[] = [];
 
-  if (result.length && result[0].values.length) {
-    const columns = result[0].columns;
-    matches.push(
-      ...result[0].values.map((row) => ({
-        symbol: row[columns.indexOf("symbol")] as string,
-        file: row[columns.indexOf("file")] as string,
-        startLine: row[columns.indexOf("startLine")] as number,
-        endLine: row[columns.indexOf("endLine")] as number,
-        hops: row[columns.indexOf("hops")] as number,
-      })),
-    );
+  while (stmt.step()) {
+    const row = stmt.getAsObject() as {
+      symbol: string;
+      file: string;
+      startLine: number;
+      endLine: number;
+      hops: number;
+    };
+    matches.push(row);
   }
+  stmt.free();
 
   return { matches };
 }

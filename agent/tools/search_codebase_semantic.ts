@@ -43,14 +43,15 @@ export function searchChunks(db: SqlJsDatabase, queryEmbedding: number[], topK: 
   // Get chunk metadata for top results
   const chunks: ChunkMatch[] = [];
   for (const { rowid, score } of topResults) {
-    const result = db.exec(`
+    const stmt = db.prepare(`
       SELECT file_path, start_line, end_line FROM chunks WHERE rowid = ?
-    `, [rowid]);
-
-    if (result.length && result[0].values.length) {
-      const [filePath, startLine, endLine] = result[0].values[0] as [string, number, number];
-      chunks.push({ filePath, startLine, endLine, score });
+    `);
+    stmt.bind([rowid]);
+    if (stmt.step()) {
+      const row = stmt.getAsObject() as { file_path: string; start_line: number; end_line: number };
+      chunks.push({ filePath: row.file_path, startLine: row.start_line, endLine: row.end_line, score });
     }
+    stmt.free();
   }
 
   return chunks;
