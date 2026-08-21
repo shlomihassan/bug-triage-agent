@@ -101,30 +101,21 @@ export default defineChannel({
         : `<form method="post" action="/dashboard/${run.runId}/stop" onsubmit="return confirm('Stop this run now? This cancels the in-flight turn immediately.')">
             <button type="submit" style="background:#c0392b;color:#fff;border:none;padding:0.5rem 1rem;border-radius:4px;cursor:pointer;">Stop this run</button>
           </form>`;
-      // Admin secret is entered per click via prompt() rather than a plain form field: the
-      // resolve-approval route checks it as a request header (matching the other admin routes
-      // on this channel), and a plain <form> cannot set custom headers — this keeps the same
-      // auth mechanism instead of adding a second, weaker one (e.g. a URL query param) just for
-      // this button.
+      // No button here calls a route directly: send()/getSession() are scoped to the calling
+      // channel, so a route on this (dashboard) channel can never resume a session parked on
+      // the github channel — confirmed live (2026-08-21) when that exact approach threw
+      // RuntimeNoActiveSessionError for continuationToken "dashboard:" instead of the real
+      // github-channel token. The only channel that can legitimately resume this session is the
+      // one that owns it, via a real GitHub comment (agent/channels/github.ts's onComment,
+      // wired to eve's defaultOnComment) — this panel links there instead of faking a button
+      // that can't actually work.
       const approvalPanel =
-        run.status === "awaiting_approval"
+        run.status === "awaiting_approval" && run.issueNumber > 0
           ? `<div style="margin:1rem 0;padding:1rem;border:1px solid #e0a800;background:#fff8e1;border-radius:4px;">
-              <p><strong>Awaiting human approval</strong> — open_pr paused this run (see agent/lib/autonomy.ts's requiresApproval). Review the diff in the latest issue comment before deciding.</p>
-              <button type="button" onclick="resolveApproval('${run.runId}','approve')" style="background:#2e7d32;color:#fff;border:none;padding:0.5rem 1rem;border-radius:4px;cursor:pointer;margin-right:0.5rem;">Approve</button>
-              <button type="button" onclick="resolveApproval('${run.runId}','deny')" style="background:#c0392b;color:#fff;border:none;padding:0.5rem 1rem;border-radius:4px;cursor:pointer;">Deny</button>
-              <script>
-                async function resolveApproval(runId, decision) {
-                  if (!confirm('Really ' + decision + ' this fix?')) return;
-                  const secret = prompt('Admin secret:');
-                  if (!secret) return;
-                  const res = await fetch('/dashboard/admin/resolve-approval/' + runId + '?decision=' + decision, {
-                    method: 'POST',
-                    headers: { 'x-admin-secret': secret },
-                  });
-                  if (!res.ok) { alert('Failed: ' + res.status + ' ' + (await res.text())); return; }
-                  location.reload();
-                }
-              </script>
+              <p><strong>Awaiting human approval</strong> — open_pr paused this run (see agent/lib/autonomy.ts's requiresApproval). Review the diff in the latest issue comment, then reply on the issue:</p>
+              <p><a href="https://github.com/${escapeHtml(process.env.GITHUB_OWNER ?? "")}/${escapeHtml(
+              process.env.GITHUB_REPO ?? "",
+            )}/issues/${run.issueNumber}"><code>@bug-triage-agent approve</code></a> or <code>@bug-triage-agent deny</code></p>
             </div>`
           : "";
       const body = `
@@ -200,40 +191,6 @@ export default defineChannel({
         reason: "manual reset after sandbox snapshot storage cleanup",
       });
       return new Response(JSON.stringify(result), {
-        headers: { "content-type": "application/json" },
-      });
-    }),
-    // Temporary operator tooling: resolves a paused open_pr approval (agent/tools/open_pr.ts's
-    // requiresApproval gate) directly, bypassing the GitHub-comment path. Needed because the
-    // GitHub channel (agent/channels/github.ts) only defines onIssue — it neither posts the
-    // pending approval question as a visible comment, nor defines onComment to dispatch a
-    // human's reply — so there is currently no way to approve/deny from the issue thread
-    // itself. This exists to unblock a specific paused run in the meantime; the real fix is
-    // wiring onComment + surfacing approval questions as GitHub comments. Safe to delete once
-    // that's done.
-    //
-    // Uses send() with intent: "resume" and the run's own stored continuationToken — not
-    // receive(), which was tried first and turned out to start a brand-new session instead of
-    // resuming the paused one (confirmed live: a second, unrelated session appeared and had to
-    // be cancelled). getSession(runId).continuationToken is the exact token the paused session
-    // is actually parked under, so resuming against it (with intent: "resume" erroring loudly
-    // if no active session is found, rather than silently starting one) is the reliable path.
-    POST("/dashboard/admin/resolve-approval/:runId", async (req, { params, getSession, send }) => {
-      if (req.headers.get("x-admin-secret") !== process.env.ADMIN_RESET_SECRET) {
-        return new Response("Forbidden", { status: 403 });
-      }
-      const url = new URL(req.url);
-      const decision = url.searchParams.get("decision");
-      if (decision !== "approve" && decision !== "deny") {
-        return new Response("decision=approve|deny query param required", { status: 400 });
-      }
-      const target = getSession(params.runId);
-      const session = await send(decision, {
-        auth: null,
-        continuationToken: target.continuationToken,
-        intent: "resume",
-      });
-      return new Response(JSON.stringify({ sessionId: session.id }), {
         headers: { "content-type": "application/json" },
       });
     }),
