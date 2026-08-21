@@ -97,6 +97,20 @@ export default defineChannel({
     POST("/dashboard/:runId/stop", async (_req, { params, getSession }) => {
       const session = getSession(params.runId);
       await session.cancel();
+      // session.cancel() stops execution but does not itself touch our own run tracking —
+      // found live tonight (agent/hooks/run-tracking.ts) when a manually-stopped run sat
+      // showing "triaging" on the dashboard indefinitely, looking identical to one still
+      // actively working, even though no further cost was accruing. Mark it explicitly rather
+      // than leave that same ambiguity for every future manual stop.
+      await store
+        .updateRun(params.runId, {
+          status: "failed",
+          outcome: "cancelled",
+          completedAt: new Date().toISOString(),
+        })
+        .catch((err) => {
+          console.error(`[dashboard] ✖ marking stopped run failed failed:`, err);
+        });
       return Response.redirect(
         new URL(`/dashboard/${params.runId}`, _req.url),
         303,

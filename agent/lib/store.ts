@@ -17,7 +17,7 @@ export interface BugRun {
   status: "triaging" | "fixing" | "awaiting_approval" | "pr_opened" | "escalated" | "failed";
   severity?: Severity;
   blastRadiusTier?: BlastRadiusTier;
-  outcome?: "auto_resolved" | "escalated" | "could_not_reproduce" | "timed_out";
+  outcome?: "auto_resolved" | "escalated" | "could_not_reproduce" | "timed_out" | "cancelled";
   prUrl?: string;
   startedAt: string;
   completedAt?: string;
