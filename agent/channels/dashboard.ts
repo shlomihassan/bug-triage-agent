@@ -34,15 +34,131 @@ function formatTokens(count: number): string {
   return count.toLocaleString("en-US");
 }
 
+// Semantic status → pill mapping. "failed"+"cancelled" reads as neutral (an operator choice,
+// not a failure); every other "failed" reads as the fail color regardless of which outcome
+// string it carries, since the outcome text itself is shown as the pill label.
+function statusPill(status: BugRun["status"], outcome: string | undefined): string {
+  if (status === "failed" && outcome === "cancelled") {
+    return `<span class="pill neutral"><span class="dot"></span>cancelled</span>`;
+  }
+  if (status === "failed") {
+    return `<span class="pill fail"><span class="dot"></span>${escapeHtml(outcome ?? "failed")}</span>`;
+  }
+  if (status === "awaiting_approval") {
+    return `<span class="pill attention"><span class="dot"></span>awaiting approval</span>`;
+  }
+  if (status === "pr_opened") {
+    return `<span class="pill success"><span class="dot"></span>pr opened</span>`;
+  }
+  if (status === "escalated") {
+    return `<span class="pill attention"><span class="dot"></span>escalated</span>`;
+  }
+  // fixing, triaging
+  return `<span class="pill active"><span class="dot"></span>${escapeHtml(status)}</span>`;
+}
+
 function layout(title: string, body: string): string {
   return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(
     title,
   )}</title><style>
-    body { font-family: system-ui, sans-serif; margin: 2rem; color: #1a1a1a; }
-    table { border-collapse: collapse; width: 100%; }
-    th, td { text-align: left; padding: 0.5rem; border-bottom: 1px solid #ddd; }
-    a { color: #0060df; }
-  </style></head><body>${body}</body></html>`;
+    :root {
+      --bg: #f3f4f7; --surface: #ffffff; --surface-2: #eceff3;
+      --text: #1a1d24; --text-muted: #5c6470; --text-faint: #9aa1ac; --border: #dde1e7;
+      --accent: #0f6f75; --accent-soft: #e0f0f0;
+      --active: #2563eb; --active-soft: #e3ecfc;
+      --attention: #b45309; --attention-soft: #fbf0dd;
+      --success: #15803d; --success-soft: #e3f5e9;
+      --fail: #b91c1c; --fail-soft: #fbe6e6;
+      --neutral: #6b7280; --neutral-soft: #eaecef;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        --bg: #12151a; --surface: #191d24; --surface-2: #20242c;
+        --text: #e8eaef; --text-muted: #99a1b0; --text-faint: #6b7280; --border: #262b34;
+        --accent: #5fd6dc; --accent-soft: #17383a;
+        --active: #60a5fa; --active-soft: #16233d;
+        --attention: #fbbf24; --attention-soft: #3a2c10;
+        --success: #4ade80; --success-soft: #163523;
+        --fail: #f87171; --fail-soft: #3a1616;
+        --neutral: #9aa1ac; --neutral-soft: #262a32;
+      }
+    }
+    :root[data-theme="dark"] {
+      --bg: #12151a; --surface: #191d24; --surface-2: #20242c;
+      --text: #e8eaef; --text-muted: #99a1b0; --text-faint: #6b7280; --border: #262b34;
+      --accent: #5fd6dc; --accent-soft: #17383a;
+      --active: #60a5fa; --active-soft: #16233d;
+      --attention: #fbbf24; --attention-soft: #3a2c10;
+      --success: #4ade80; --success-soft: #163523;
+      --fail: #f87171; --fail-soft: #3a1616;
+      --neutral: #9aa1ac; --neutral-soft: #262a32;
+    }
+    * { box-sizing: border-box; }
+    body {
+      background: var(--bg); color: var(--text);
+      font-family: ui-sans-serif, "Segoe UI", system-ui, -apple-system, sans-serif;
+      margin: 0; padding: 32px 24px 80px; font-variant-numeric: tabular-nums;
+    }
+    .mono { font-family: ui-monospace, "SF Mono", "Cascadia Code", Consolas, monospace; }
+    main { max-width: 1200px; margin: 0 auto; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    h1 { font-size: 22px; font-weight: 700; margin: 0 0 4px; letter-spacing: -0.01em; }
+    h2 { font-size: 13px; font-family: ui-monospace, monospace; text-transform: uppercase;
+      letter-spacing: 0.06em; color: var(--text-muted); margin: 24px 0 12px; }
+    .subtitle { color: var(--text-muted); font-size: 13.5px; margin: 0 0 20px; }
+    .top { display: flex; justify-content: space-between; align-items: flex-end; gap: 20px;
+      margin-bottom: 20px; flex-wrap: wrap; }
+    .budget-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+      padding: 14px 18px; min-width: 260px; }
+    .budget-row { display: flex; justify-content: space-between; align-items: baseline;
+      font-size: 12px; color: var(--text-muted); margin-bottom: 8px; }
+    .budget-row strong { color: var(--text); font-family: ui-monospace, monospace; font-size: 13px; }
+    .budget-track { height: 7px; border-radius: 4px; background: var(--surface-2); overflow: hidden; }
+    .budget-fill { height: 100%; border-radius: 4px; background: linear-gradient(90deg, var(--accent), var(--active)); }
+    .table-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+      overflow: hidden; margin-bottom: 20px; }
+    .table-scroll { overflow-x: auto; }
+    table { border-collapse: collapse; width: 100%; font-size: 13px; }
+    thead th { text-align: left; font-family: ui-monospace, monospace; font-size: 10.5px;
+      text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); font-weight: 600;
+      padding: 11px 14px; border-bottom: 1px solid var(--border); background: var(--surface-2);
+      white-space: nowrap; }
+    td { padding: 10px 14px; border-bottom: 1px solid var(--border); white-space: nowrap;
+      vertical-align: middle; }
+    tbody tr:last-child td { border-bottom: none; }
+    tbody tr:hover { background: var(--surface-2); }
+    td.num { font-family: ui-monospace, monospace; text-align: right; }
+    td.title { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    td.dim { color: var(--text-muted); font-size: 12.5px; }
+    td.time { color: var(--text-muted); font-family: ui-monospace, monospace; font-size: 12px; }
+    .pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600;
+      padding: 4px 10px; border-radius: 100px; white-space: nowrap; }
+    .pill .dot { width: 6px; height: 6px; border-radius: 50%; }
+    .pill.active { color: var(--active); background: var(--active-soft); }
+    .pill.attention { color: var(--attention); background: var(--attention-soft); }
+    .pill.success { color: var(--success); background: var(--success-soft); }
+    .pill.fail { color: var(--fail); background: var(--fail-soft); }
+    .pill.neutral { color: var(--neutral); background: var(--neutral-soft); }
+    .stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px;
+      margin: 20px 0 8px; }
+    .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+      padding: 13px 16px; }
+    .stat-card .stat-label { font-family: ui-monospace, monospace; font-size: 10.5px;
+      text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 6px; }
+    .stat-card .stat-value { font-family: ui-monospace, monospace; font-size: 18px; font-weight: 700; }
+    .callout { border: 1px solid var(--border); border-left: 3px solid var(--accent);
+      background: var(--surface); border-radius: 8px; padding: 12px 16px; margin: 16px 0;
+      font-size: 13px; }
+    .callout.attention { border-left-color: var(--attention); background: var(--attention-soft); }
+    button.btn { border: none; padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer;
+      font-size: 13px; font-weight: 600; color: #fff; }
+    button.btn:hover { filter: brightness(0.92); }
+    button.btn.danger { background: var(--fail); }
+    button.btn.success { background: var(--success); }
+    code { font-family: ui-monospace, monospace; font-size: 0.9em; background: var(--surface-2);
+      padding: 1px 5px; border-radius: 4px; border: 1px solid var(--border); }
+  </style></head><body><main>${body}</main></body></html>`;
 }
 
 export default defineChannel({
@@ -50,34 +166,45 @@ export default defineChannel({
     GET("/dashboard", async () => {
       const runs = await store.listRuns();
       const totalSpend = runs.reduce((sum, run) => sum + totalCost(run), 0);
+      const budgetPct = Math.min(100, (totalSpend / 50) * 100);
       const rows = runs
         .map((run) => {
           const { freshTokens, cachedTokens } = tokenTotals(run);
           return `<tr>
-            <td><a href="/dashboard/${run.runId}">#${run.issueNumber}</a></td>
-            <td>${escapeHtml(run.issueTitle)}</td>
-            <td>${run.severity ?? "-"}</td>
-            <td>${run.blastRadiusTier ?? "-"}</td>
-            <td>${run.status}</td>
-            <td>${run.outcome ?? "-"}</td>
-            <td>$${totalCost(run).toFixed(4)}</td>
-            <td>${formatTime(run.startedAt)}</td>
-            <td>${formatTime(run.completedAt)}</td>
-            <td>${formatElapsed(run.startedAt, run.completedAt)}</td>
-            <td>${formatTokens(freshTokens)}</td>
-            <td>${formatTokens(cachedTokens)}</td>
+            <td><a class="mono" href="/dashboard/${run.runId}">#${run.issueNumber}</a></td>
+            <td class="title">${escapeHtml(run.issueTitle)}</td>
+            <td class="dim">${run.severity ?? "-"}</td>
+            <td class="dim">${run.blastRadiusTier ?? "-"}</td>
+            <td>${statusPill(run.status, run.outcome)}</td>
+            <td class="dim">${run.status === "failed" ? "-" : (run.outcome ?? "-")}</td>
+            <td class="num">$${totalCost(run).toFixed(4)}</td>
+            <td class="time">${formatTime(run.startedAt)}</td>
+            <td class="time">${formatTime(run.completedAt)}</td>
+            <td class="num">${formatElapsed(run.startedAt, run.completedAt)}</td>
+            <td class="num">${formatTokens(freshTokens)}</td>
+            <td class="num">${formatTokens(cachedTokens)}</td>
           </tr>`;
         })
         .join("");
       const body = `
-        <h1>Bug Triage Runs</h1>
-        <p>Total spend: $${totalSpend.toFixed(4)} of $50.00 budget</p>
+        <div class="top">
+          <div>
+            <h1>Bug Triage Runs</h1>
+            <p class="subtitle">${runs.length} runs</p>
+          </div>
+          <div class="budget-card">
+            <div class="budget-row"><span>Spend this session</span><strong>$${totalSpend.toFixed(2)} / $50.00</strong></div>
+            <div class="budget-track"><div class="budget-fill" style="width: ${budgetPct.toFixed(1)}%"></div></div>
+          </div>
+        </div>
+        <div class="table-card"><div class="table-scroll">
         <table>
           <thead><tr><th>Issue</th><th>Title</th><th>Severity</th><th>Blast radius</th>
-          <th>Status</th><th>Outcome</th><th>Cost</th><th>Started</th><th>Ended</th>
-          <th>Elapsed</th><th>Fresh tokens</th><th>Cached tokens</th></tr></thead>
+          <th>Status</th><th>Outcome</th><th class="num">Cost</th><th>Started</th><th>Ended</th>
+          <th class="num">Elapsed</th><th class="num">Fresh tokens</th><th class="num">Cached tokens</th></tr></thead>
           <tbody>${rows}</tbody>
-        </table>`;
+        </table>
+        </div></div>`;
       return new Response(layout("Bug Triage Runs", body), {
         headers: { "content-type": "text/html; charset=utf-8" },
       });
@@ -89,10 +216,10 @@ export default defineChannel({
         .map((call) => {
           const fresh = Math.max(0, call.inputTokens - call.cacheReadTokens);
           return `<tr>
-            <td>${formatTime(call.at)}</td><td>${call.phase}</td><td>${call.model}</td>
-            <td>${call.inputTokens}</td><td>${call.outputTokens}</td>
-            <td>${formatTokens(fresh)}</td><td>${formatTokens(call.cacheReadTokens)}</td>
-            <td>$${call.costUsd.toFixed(4)}</td>
+            <td class="time">${formatTime(call.at)}</td><td class="mono">${call.phase}</td><td class="mono">${call.model}</td>
+            <td class="num">${call.inputTokens}</td><td class="num">${call.outputTokens}</td>
+            <td class="num">${formatTokens(fresh)}</td><td class="num">${formatTokens(call.cacheReadTokens)}</td>
+            <td class="num">$${call.costUsd.toFixed(4)}</td>
           </tr>`;
         })
         .join("");
@@ -100,7 +227,7 @@ export default defineChannel({
       const stopButton = TERMINAL_STATUSES.includes(run.status)
         ? ""
         : `<form method="post" action="/dashboard/${run.runId}/stop" onsubmit="return confirm('Stop this run now? This cancels the in-flight turn immediately.')">
-            <button type="submit" style="background:#c0392b;color:#fff;border:none;padding:0.5rem 1rem;border-radius:4px;cursor:pointer;">Stop this run</button>
+            <button type="submit" class="btn danger">Stop this run</button>
           </form>`;
       // open_pr.ts parks a high-blast-radius fix (PendingPr, lib/store.ts) instead of asking
       // eve to pause the session for approval — resuming a paused GitHub-channel session from
@@ -115,13 +242,13 @@ export default defineChannel({
       const pendingPr = run.pendingPr;
       const approvalPanel =
         run.status === "awaiting_approval" && pendingPr
-          ? `<div style="margin:1rem 0;padding:1rem;border:1px solid #e0a800;background:#fff8e1;border-radius:4px;">
-              <p><strong>Awaiting human approval</strong>: ${escapeHtml(pendingPr.title)}</p>
-              <p>Branch <code>${escapeHtml(pendingPr.branch)}</code> → <code>${escapeHtml(
+          ? `<div class="callout attention">
+              <p style="margin:0 0 6px;"><strong>Awaiting human approval</strong>: ${escapeHtml(pendingPr.title)}</p>
+              <p style="margin:0 0 10px;">Branch <code>${escapeHtml(pendingPr.branch)}</code> &rarr; <code>${escapeHtml(
               pendingPr.owner,
             )}/${escapeHtml(pendingPr.repo)}</code>. Review the diff in the latest issue comment before deciding.</p>
-              <button type="button" onclick="resolveApproval('${run.runId}','approve')" style="background:#2e7d32;color:#fff;border:none;padding:0.5rem 1rem;border-radius:4px;cursor:pointer;margin-right:0.5rem;">Approve</button>
-              <button type="button" onclick="resolveApproval('${run.runId}','deny')" style="background:#c0392b;color:#fff;border:none;padding:0.5rem 1rem;border-radius:4px;cursor:pointer;">Deny</button>
+              <button type="button" onclick="resolveApproval('${run.runId}','approve')" class="btn success" style="margin-right:0.5rem;">Approve</button>
+              <button type="button" onclick="resolveApproval('${run.runId}','deny')" class="btn danger">Deny</button>
               <script>
                 async function resolveApproval(runId, decision) {
                   if (!confirm('Really ' + decision + ' this fix?')) return;
@@ -139,24 +266,35 @@ export default defineChannel({
           : "";
       const body = `
         <p><a href="/dashboard">&larr; All runs</a></p>
-        <h1>#${run.issueNumber}: ${escapeHtml(run.issueTitle)}</h1>
-        <p>Status: ${run.status} | Severity: ${run.severity ?? "-"} | Blast radius: ${
-        run.blastRadiusTier ?? "-"
-      } | Outcome: ${run.outcome ?? "-"}</p>
-        <p>${run.prUrl ? `<a href="${escapeHtml(run.prUrl)}">Pull request</a>` : "No PR yet"}</p>
-        <p>Started: ${formatTime(run.startedAt)} | Ended: ${formatTime(run.completedAt)} |
-        Elapsed: ${formatElapsed(run.startedAt, run.completedAt)}</p>
-        <p>Total cost: $${totalCost(run).toFixed(4)} | Fresh tokens: ${formatTokens(
-        freshTokens,
-      )} | Cached tokens: ${formatTokens(cachedTokens)}</p>
+        <div class="top">
+          <div>
+            <h1>#${run.issueNumber}: ${escapeHtml(run.issueTitle)}</h1>
+            <p class="subtitle">
+              ${statusPill(run.status, run.outcome)}
+              &nbsp; Severity: <strong class="mono">${run.severity ?? "-"}</strong>
+              &nbsp; Blast radius: <strong class="mono">${run.blastRadiusTier ?? "-"}</strong>
+              &nbsp; Outcome: <strong class="mono">${run.outcome ?? "-"}</strong>
+            </p>
+            <p>${run.prUrl ? `<a href="${escapeHtml(run.prUrl)}">Pull request &rarr;</a>` : "No PR yet"}</p>
+          </div>
+        </div>
+        <div class="stat-row">
+          <div class="stat-card"><div class="stat-label">Total cost</div><div class="stat-value">$${totalCost(run).toFixed(4)}</div></div>
+          <div class="stat-card"><div class="stat-label">Elapsed</div><div class="stat-value">${formatElapsed(run.startedAt, run.completedAt)}</div></div>
+          <div class="stat-card"><div class="stat-label">Fresh tokens</div><div class="stat-value">${formatTokens(freshTokens)}</div></div>
+          <div class="stat-card"><div class="stat-label">Cached tokens</div><div class="stat-value" style="color:var(--success)">${formatTokens(cachedTokens)}</div></div>
+        </div>
+        <p class="subtitle">Started ${formatTime(run.startedAt)} &middot; Ended ${formatTime(run.completedAt)}</p>
         ${approvalPanel}
         ${stopButton}
         <h2>Model calls</h2>
+        <div class="table-card"><div class="table-scroll">
         <table>
-          <thead><tr><th>At</th><th>Phase</th><th>Model</th><th>In tokens</th>
-          <th>Out tokens</th><th>Fresh</th><th>Cached</th><th>Cost</th></tr></thead>
+          <thead><tr><th>At</th><th>Phase</th><th>Model</th><th class="num">In tokens</th>
+          <th class="num">Out tokens</th><th class="num">Fresh</th><th class="num">Cached</th><th class="num">Cost</th></tr></thead>
           <tbody>${calls}</tbody>
-        </table>`;
+        </table>
+        </div></div>`;
       return new Response(layout(`#${run.issueNumber}`, body), {
         headers: { "content-type": "text/html; charset=utf-8" },
       });
