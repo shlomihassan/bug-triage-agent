@@ -7,6 +7,11 @@ export interface ModelCallRecord {
   readonly costUsd: number;
   readonly inputTokens: number;
   readonly outputTokens: number;
+  // Split of inputTokens actually billed at cache rates (see agent/lib/pricing.ts) — surfaced
+  // separately so the dashboard can show real fresh-vs-cached token counts, not just a single
+  // opaque input total. Both default to 0 for call sites that don't report a cache split.
+  readonly cacheReadTokens: number;
+  readonly cacheWriteTokens: number;
   readonly at: string;
 }
 
@@ -28,6 +33,20 @@ export interface BugRun {
 // how a run's spend is computed, rather than each caller re-summing modelCalls independently.
 export function totalCost(run: BugRun): number {
   return run.modelCalls.reduce((sum, call) => sum + call.costUsd, 0);
+}
+
+// "Fresh" = input tokens not served from cache (inputTokens - cacheReadTokens) — includes both
+// genuinely new tokens and any cache-write tokens, since a cache write still pays to process the
+// content once. "Cached" = cacheReadTokens, the cheap 0.1x-rate hits. Shared with dashboard.ts so
+// the run list and run detail pages report the same split the same way.
+export function tokenTotals(run: BugRun): { freshTokens: number; cachedTokens: number } {
+  return run.modelCalls.reduce(
+    (totals, call) => ({
+      freshTokens: totals.freshTokens + Math.max(0, call.inputTokens - call.cacheReadTokens),
+      cachedTokens: totals.cachedTokens + call.cacheReadTokens,
+    }),
+    { freshTokens: 0, cachedTokens: 0 },
+  );
 }
 
 export interface BugRunStore {

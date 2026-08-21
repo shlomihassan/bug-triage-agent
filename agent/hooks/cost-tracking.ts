@@ -9,16 +9,17 @@ export interface StepCompletedLike {
       readonly costUsd?: number;
       readonly inputTokens?: number;
       readonly outputTokens?: number;
-      // Real field names (verified against node_modules/eve/dist/src/compiled/@ai-sdk/provider
-      // /index.d.ts's LanguageModelV2Usage and .../anthropic/index.d.ts's AnthropicUsageIteration
-      // — `inputTokenDetails` used below previously does not exist anywhere on eve's actual usage
-      // type, so cacheReadTokens/cacheWriteTokens silently read as undefined on every call, every
-      // run, and this hook always priced input at the full uncached rate. Confirmed live via
-      // `vercel agent-runs trace` on a real run: turn-level usage showed cachedInputTokens ~97%
-      // of inputTokens, i.e. caching was working in production the whole time — only this hook's
-      // field path was wrong.
-      readonly cachedInputTokens?: number;
-      readonly cacheCreationInputTokens?: number;
+      // Real, flat field names — verified empirically, not from a type file: two rounds of
+      // static type-reading guessed wrong (usage.inputTokenDetails.cacheReadTokens, then
+      // usage.cachedInputTokens/cacheCreationInputTokens), because eve's step.completed usage
+      // object doesn't match any of the AI SDK's documented usage types cleanly. Confirmed by
+      // adding a raw JSON.stringify(usage) log and running one real turn through `eve dev`
+      // locally: the actual payload is flat — {"inputTokens":11745,"outputTokens":4,
+      // "cacheReadTokens":0,"cacheWriteTokens":11743}. Caching itself was working in production
+      // the whole time (confirmed separately via `vercel agent-runs trace`); only this hook's
+      // field path was wrong, so it always priced input at the full uncached rate.
+      readonly cacheReadTokens?: number;
+      readonly cacheWriteTokens?: number;
     };
   };
 }
@@ -32,8 +33,8 @@ export function extractCostRecord(
   if (!usage) return null;
   const inputTokens = usage.inputTokens ?? 0;
   const outputTokens = usage.outputTokens ?? 0;
-  const cacheReadTokens = usage.cachedInputTokens ?? 0;
-  const cacheWriteTokens = usage.cacheCreationInputTokens ?? 0;
+  const cacheReadTokens = usage.cacheReadTokens ?? 0;
+  const cacheWriteTokens = usage.cacheWriteTokens ?? 0;
   console.log(
     `[cost-tracking] in=${inputTokens} out=${outputTokens} cacheRead=${cacheReadTokens} cacheWrite=${cacheWriteTokens}`,
   );
@@ -45,16 +46,18 @@ export function extractCostRecord(
     // model — this agent calls Anthropic directly via agent/agent.ts, so that field is
     // reliably undefined here. Compute cost ourselves from token counts, the same way the
     // direct-call tools (Tasks 10-12) already do, rather than trust a field this configuration
-    // never fills in. cachedInputTokens/cacheCreationInputTokens carry the real cache read/write
-    // split, so a session with an active prompt cache (the large, repeated system instructions +
-    // tool defs) is priced at the real, cheaper per-token rate instead of treating every input
-    // token as a fresh, full-price one.
+    // never fills in. cacheReadTokens/cacheWriteTokens carry the real cache read/write split, so
+    // a session with an active prompt cache (the large, repeated system instructions + tool
+    // defs) is priced at the real, cheaper per-token rate instead of treating every input token
+    // as a fresh, full-price one.
     costUsd: calculateCostUsd(model, inputTokens, outputTokens, {
       cacheReadTokens,
       cacheWriteTokens,
     }),
     inputTokens,
     outputTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
     at: new Date().toISOString(),
   };
 }

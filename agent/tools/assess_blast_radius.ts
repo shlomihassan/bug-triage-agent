@@ -40,13 +40,20 @@ export default defineTool({
     });
     const inputTokens = usage.inputTokens ?? 0;
     const outputTokens = usage.outputTokens ?? 0;
+    const cacheReadTokens = usage.inputTokenDetails.cacheReadTokens ?? 0;
+    const cacheWriteTokens = usage.inputTokenDetails.cacheWriteTokens ?? 0;
     await store
       .recordModelCall(ctx.session.id, {
         phase: "assess_blast_radius",
         model: HAIKU_MODEL_ID,
-        costUsd: calculateCostUsd(HAIKU_MODEL_ID, inputTokens, outputTokens),
+        costUsd: calculateCostUsd(HAIKU_MODEL_ID, inputTokens, outputTokens, {
+          cacheReadTokens,
+          cacheWriteTokens,
+        }),
         inputTokens,
         outputTokens,
+        cacheReadTokens,
+        cacheWriteTokens,
         at: new Date().toISOString(),
       })
       .catch((err) => console.error(`[assess_blast_radius] ✖ recordModelCall failed:`, err));

@@ -1,5 +1,5 @@
 import { defineChannel, GET, POST } from "eve/channels";
-import { createRedisStore, totalCost, type BugRun } from "../lib/store";
+import { createRedisStore, totalCost, tokenTotals, type BugRun } from "../lib/store";
 
 const TERMINAL_STATUSES: BugRun["status"][] = ["pr_opened", "failed"];
 
@@ -11,6 +11,26 @@ function escapeHtml(value: string): string {
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;");
+}
+
+function formatTime(iso: string | undefined): string {
+  if (!iso) return "-";
+  return new Date(iso).toISOString().replace("T", " ").replace(/\.\d+Z$/, "Z");
+}
+
+// completedAt is unset for a still-running run — elapsed counts up to now instead, so an
+// in-progress run's row shows live-growing elapsed time rather than a blank.
+function formatElapsed(startedAt: string, completedAt: string | undefined): string {
+  const startMs = new Date(startedAt).getTime();
+  const endMs = completedAt ? new Date(completedAt).getTime() : Date.now();
+  const totalSeconds = Math.max(0, Math.round((endMs - startMs) / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}m ${seconds}s${completedAt ? "" : " (running)"}`;
+}
+
+function formatTokens(count: number): string {
+  return count.toLocaleString("en-US");
 }
 
 function layout(title: string, body: string): string {
@@ -30,8 +50,9 @@ export default defineChannel({
       const runs = await store.listRuns();
       const totalSpend = runs.reduce((sum, run) => sum + totalCost(run), 0);
       const rows = runs
-        .map(
-          (run) => `<tr>
+        .map((run) => {
+          const { freshTokens, cachedTokens } = tokenTotals(run);
+          return `<tr>
             <td><a href="/dashboard/${run.runId}">#${run.issueNumber}</a></td>
             <td>${escapeHtml(run.issueTitle)}</td>
             <td>${run.severity ?? "-"}</td>
@@ -39,15 +60,21 @@ export default defineChannel({
             <td>${run.status}</td>
             <td>${run.outcome ?? "-"}</td>
             <td>$${totalCost(run).toFixed(4)}</td>
-          </tr>`,
-        )
+            <td>${formatTime(run.startedAt)}</td>
+            <td>${formatTime(run.completedAt)}</td>
+            <td>${formatElapsed(run.startedAt, run.completedAt)}</td>
+            <td>${formatTokens(freshTokens)}</td>
+            <td>${formatTokens(cachedTokens)}</td>
+          </tr>`;
+        })
         .join("");
       const body = `
         <h1>Bug Triage Runs</h1>
         <p>Total spend: $${totalSpend.toFixed(4)} of $50.00 budget</p>
         <table>
           <thead><tr><th>Issue</th><th>Title</th><th>Severity</th><th>Blast radius</th>
-          <th>Status</th><th>Outcome</th><th>Cost</th></tr></thead>
+          <th>Status</th><th>Outcome</th><th>Cost</th><th>Started</th><th>Ended</th>
+          <th>Elapsed</th><th>Fresh tokens</th><th>Cached tokens</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>`;
       return new Response(layout("Bug Triage Runs", body), {
@@ -58,14 +85,17 @@ export default defineChannel({
       const run = await store.getRun(params.runId);
       if (!run) return new Response("Not found", { status: 404 });
       const calls = run.modelCalls
-        .map(
-          (call) => `<tr>
-            <td>${call.at}</td><td>${call.phase}</td><td>${call.model}</td>
+        .map((call) => {
+          const fresh = Math.max(0, call.inputTokens - call.cacheReadTokens);
+          return `<tr>
+            <td>${formatTime(call.at)}</td><td>${call.phase}</td><td>${call.model}</td>
             <td>${call.inputTokens}</td><td>${call.outputTokens}</td>
+            <td>${formatTokens(fresh)}</td><td>${formatTokens(call.cacheReadTokens)}</td>
             <td>$${call.costUsd.toFixed(4)}</td>
-          </tr>`,
-        )
+          </tr>`;
+        })
         .join("");
+      const { freshTokens, cachedTokens } = tokenTotals(run);
       const stopButton = TERMINAL_STATUSES.includes(run.status)
         ? ""
         : `<form method="post" action="/dashboard/${run.runId}/stop" onsubmit="return confirm('Stop this run now? This cancels the in-flight turn immediately.')">
@@ -78,12 +108,16 @@ export default defineChannel({
         run.blastRadiusTier ?? "-"
       } | Outcome: ${run.outcome ?? "-"}</p>
         <p>${run.prUrl ? `<a href="${escapeHtml(run.prUrl)}">Pull request</a>` : "No PR yet"}</p>
-        <p>Total cost: $${totalCost(run).toFixed(4)}</p>
+        <p>Started: ${formatTime(run.startedAt)} | Ended: ${formatTime(run.completedAt)} |
+        Elapsed: ${formatElapsed(run.startedAt, run.completedAt)}</p>
+        <p>Total cost: $${totalCost(run).toFixed(4)} | Fresh tokens: ${formatTokens(
+        freshTokens,
+      )} | Cached tokens: ${formatTokens(cachedTokens)}</p>
         ${stopButton}
         <h2>Model calls</h2>
         <table>
           <thead><tr><th>At</th><th>Phase</th><th>Model</th><th>In tokens</th>
-          <th>Out tokens</th><th>Cost</th></tr></thead>
+          <th>Out tokens</th><th>Fresh</th><th>Cached</th><th>Cost</th></tr></thead>
           <tbody>${calls}</tbody>
         </table>`;
       return new Response(layout(`#${run.issueNumber}`, body), {
