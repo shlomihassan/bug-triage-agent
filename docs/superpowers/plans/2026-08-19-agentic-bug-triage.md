@@ -13,7 +13,7 @@
 - Blank-repo build: no code, git history, or shared Vercel project copied from any prior related project. Only architectural patterns are reused (cited inline where relevant), never files.
 - Node.js >=24 (eve's requirement).
 - Never auto-merge or push directly to `main` on the Vikunja fork — draft PRs only.
-- Every model call must be logged with real `costUsd`/`inputTokens`/`outputTokens` (from eve's `step.completed` event, or from the raw AI SDK `usage` object for direct calls made inside a tool).
+- Every model call must be logged with real `costUsd`/`inputTokens`/`outputTokens`: `inputTokens`/`outputTokens` come from eve's `step.completed` event or the raw AI SDK `usage` object depending on the call site; `costUsd` comes from eve's `step.completed.data.usage.costUsd` for the primary agent loop (Task 9), or from `calculateCostUsd()` (Task 10's `agent/lib/pricing.ts`) for direct-call tools — the raw AI SDK `usage` object has no `costUsd` field of its own.
 - Model routing: `claude-sonnet-5` drives the main agent loop (reproduction + fix-writing); `claude-haiku-4-5-20251001` for severity/blast-radius classification; `claude-opus-5` only via the explicit stuck-fix escalation path.
 - No RAG/embeddings for cross-bug memory — an append-only notes log read into context at session start.
 
@@ -55,12 +55,14 @@ bug-triage-agent/
 │       ├── autonomy.ts                # pure requiresApproval() override function
 │       ├── config.ts                  # env var loading/validation
 │       ├── store.ts                   # BugRunStore: Redis-backed + in-memory
-│       └── anthropic.ts               # shared @ai-sdk/anthropic model getters
+│       ├── anthropic.ts               # shared @ai-sdk/anthropic model getters
+│       └── pricing.ts                 # calculateCostUsd() — the AI SDK usage object has no costUsd field
 └── tests/
     ├── autonomy.test.ts
     ├── store.test.ts
     ├── cost-tracking.test.ts
     ├── anthropic.test.ts
+    ├── pricing.test.ts
     └── open-pr-approval.test.ts
 ```
 
@@ -422,9 +424,47 @@ git commit -m "chore: scaffold eve project with direct Anthropic model"
 
 ## Task 6: Sandbox bootstrap — clone the Vikunja fork
 
+**Correction to the plan, discovered during the final whole-branch review (after Task 15
+wired the GitHub channel):** the custom `agent/sandbox/sandbox.ts` bootstrap below clones the
+fork over unauthenticated `https://github.com/...` into `/workspace/repo`. But eve's
+`githubChannel` (Task 15) already checks out the repo automatically on **every turn**, via a
+built-in `turn.started` handler (confirmed in `node_modules/eve/dist/src/public/channels/github/checkout.js`:
+`resolvePath(n.path ?? "/workspace")`) — authenticated (the installation token is brokered at
+the sandbox firewall, never embedded in the URL), into `/workspace` (not `/workspace/repo`).
+Left as originally written, the sandbox ends up with **two separate checkouts of the same
+repo** at different paths, and `agent/instructions.md` (Task 15) pointed every command at the
+bootstrap's unauthenticated `/workspace/repo` — the one the channel doesn't know about — rather
+than the channel-managed, authenticated `/workspace`. This is fixed by removing this task's git
+clone step entirely (Step 2 below is now a no-op/deleted file) and pointing
+`agent/instructions.md` at `/workspace` instead; see Task 15's corresponding correction note.
+`agent/lib/config.ts`'s `loadConfig()` is unaffected and still needed — `open_pr.ts` (Task 14)
+uses it for its own separate PAT-authenticated Octokit call, independent of the channel's
+checkout.
+
+One related risk this correction does **not** attempt to fix blind (no live sandbox available
+to verify against): the channel's checkout also calls `sandbox.setNetworkPolicy(...)` with an
+allow-list of only `github.com`/`codeload.github.com` (deny-all otherwise) on every turn. This
+would block `pnpm install`/`mage test:*`'s own dependency fetches (npm registry, Go module
+proxy) during the solve phase, unless something widens the policy again after checkout runs.
+**Flag this explicitly as a thing to watch for in Task 17's live end-to-end run** — if the
+agent's `bash` calls start failing with network errors during dependency installation, this is
+the cause, and the fix is a tool-level `ctx.getSandbox()` call to `setNetworkPolicy` (hooks
+cannot do this — `HookContext` has no sandbox accessor) before the solve phase's first
+install/test command.
+
+**Second correction, discovered via live testing in Task 17:** the default sandbox turned out
+NOT to be sufficient after all. The GitHub channel's own automatic checkout failed on the real
+deployment with `fatal: detected dubious ownership in repository at '/workspace'` — the
+sandbox volume's UID doesn't match the process UID inside it, which git treats as a safety
+violation by default. `agent/sandbox/sandbox.ts` is back, but now doing something different
+from either its original (redundant clone) or its briefly-deleted state: it runs
+`git config --global --add safe.directory /workspace` in `onSession`, once per session, before
+the channel's first per-turn checkout. This is setup-only — it still does not clone or touch
+git remotes itself, so it doesn't reintroduce the original duplication problem.
+
 **Files:**
-- Create: `agent/sandbox/sandbox.ts`
 - Create: `agent/lib/config.ts`
+- Create: `agent/sandbox/sandbox.ts` (setup-only — see the second correction above; NOT a clone)
 
 **Interfaces:**
 - Consumes: `process.env.GITHUB_OWNER`, `process.env.GITHUB_REPO`.
@@ -448,41 +488,30 @@ export function loadConfig(): AppConfig {
 }
 ```
 
-- [ ] **Step 2: Write the sandbox bootstrap**
+- [ ] **Step 2 (superseded — do not create `agent/sandbox/sandbox.ts`):** the GitHub channel
+(Task 15) checks out the repo automatically into `/workspace` on every turn, authenticated. A
+custom sandbox bootstrap would only create a second, unauthenticated, unused checkout. If
+`agent/sandbox/sandbox.ts` already exists from before this correction, delete it.
 
-```ts
-// agent/sandbox/sandbox.ts
-import { defineSandbox } from "eve/sandbox";
-import { loadConfig } from "../lib/config";
+`/workspace` (not `/workspace/repo`) becomes the working tree every default tool (`bash`,
+`read_file`, `glob`, `grep`) operates against, populated by the channel — see Task 15's
+correction note for how `agent/instructions.md` reflects this.
 
-export default defineSandbox({
-  revalidationKey: () => "vikunja-bootstrap-v1",
-  async bootstrap({ use }) {
-    const sandbox = await use();
-    const { githubOwner, githubRepo } = loadConfig();
-    await sandbox.run({
-      command: `git clone --depth 1 https://github.com/${githubOwner}/${githubRepo}.git /workspace/repo`,
-    });
-  },
-});
-```
-
-`/workspace/repo` becomes the working tree every default tool (`bash`, `read_file`, `glob`, `grep`) and every authored tool's `ctx.getSandbox()` operates against.
-
-- [ ] **Step 3: Verify the sandbox boots and clones**
+- [ ] **Step 3: Verify the config loader typechecks**
 
 ```bash
-cp .env.example .env.local
-# fill in GITHUB_OWNER=<your-github-username>, GITHUB_REPO=vikunja, ANTHROPIC_API_KEY=<key>
-npm run dev
+npm run typecheck
 ```
 
-In the dev TUI, ask: `List the top-level files under /workspace/repo`. Expected: the real Vikunja file tree (`pkg/`, `frontend/`, `go.mod`, ...).
+Live verification of the actual checkout (that `/workspace` really does contain the Vikunja
+tree once a real issue triggers a session) happens in Task 17, once the GitHub channel and a
+real installation exist — there is no sandbox to boot against in this task anymore, since
+Task 6 no longer owns any sandbox definition.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add agent/sandbox/sandbox.ts agent/lib/config.ts
+git add agent/lib/config.ts
 git commit -m "feat: bootstrap sandbox by cloning the vikunja fork"
 ```
 
@@ -876,6 +905,18 @@ git commit -m "feat: add bug-run store with in-memory and Redis backends"
 
 ## Task 9: Cost-tracking hook
 
+**Correction to the plan, discovered via Task 17's live end-to-end test:** eve's own
+`step.completed.data.usage.costUsd` — which this task originally trusted as-is — turned out to
+never be populated for this agent's configuration. Real deployment logs showed five genuine
+Sonnet steps (~19,000-20,000 input tokens, hundreds of output tokens each) all recording
+`costUsd: $0.0000`. The likely reason: eve/AI Gateway computes that field when a model is
+routed through the Gateway; this agent calls `@ai-sdk/anthropic` directly (`agent/agent.ts`),
+bypassing the Gateway entirely by design (see the Global Constraints' model-routing note), so
+nothing in that path has pricing knowledge of the call. Fixed by having `extractCostRecord`
+compute `costUsd` itself via `calculateCostUsd()` (Task 10's `agent/lib/pricing.ts`) from the
+real `inputTokens`/`outputTokens` eve does report — the same approach already used for the
+three direct-call tools — rather than trusting a field this configuration never fills in.
+
 **Files:**
 - Create: `agent/hooks/cost-tracking.ts`
 - Test: `tests/cost-tracking.test.ts`
@@ -1015,14 +1056,98 @@ git commit -m "feat: track real per-step cost from eve's step.completed usage da
 
 ## Task 10: `classify_severity` tool (Haiku)
 
+**Correction to the plan, discovered during implementation:** every direct-call tool below
+originally read `usage.costUsd` off the raw Vercel AI SDK's `generateObject`/`generateText`
+return value, on the assumption it worked like eve's own `step.completed.data.usage` (Task 9,
+confirmed real via eve's own vendored types). It doesn't — the AI SDK's `LanguageModelUsage`
+type (`node_modules/ai/dist/index.d.ts`) has only token counts (`inputTokens`, `outputTokens`,
+`inputTokenDetails`, etc.), no `costUsd` field at all. `costUsd` only exists on eve's event
+because eve/AI Gateway computes it from a pricing table; a direct provider call bypasses that
+entirely. Left as originally written, every Haiku/Opus tool call's `costUsd` would silently
+read as `undefined` and default to `0` — quietly breaking the budget-tracking story for exactly
+the calls meant to demonstrate cheap-vs-expensive model routing. Fixed here with a small,
+explicitly-labeled pricing table (Step 0 below); Tasks 11 and 12 reuse it.
+
 **Files:**
+- Create: `agent/lib/pricing.ts`
+- Test: `tests/pricing.test.ts`
 - Create: `agent/tools/classify_severity.ts`
 - Create: `agent/lib/anthropic.ts`
 - Test: `tests/anthropic.test.ts`
 
 **Interfaces:**
 - Consumes: `BugRunStore` (Task 8).
-- Produces: tool `classify_severity`, callable by the model during triage; returns `{ severity: Severity; rationale: string }`.
+- Produces: `calculateCostUsd(model, inputTokens, outputTokens): number`, reused by Tasks 11 and
+  12. Produces: tool `classify_severity`, callable by the model during triage; returns
+  `{ severity: Severity; rationale: string }`.
+
+- [ ] **Step 0: Pricing table**
+
+**Correction, verified live during Task 17:** the pricing table below originally used
+$3/$15 (Sonnet) and $15/$75 (Opus) per million tokens — guesses that turned out to be wrong by
+1.5x and 3x respectively (only the Haiku figures were accidentally correct). Fetched directly
+from `platform.claude.com/docs/en/about-claude/pricing` on 2026-08-20 and corrected below: Sonnet
+5 is $2/$10, Opus 5 is $5/$25. This means real spend during earlier live testing was
+overstated by the dashboard, not understated — still real money, but less than first reported.
+
+```ts
+// agent/lib/pricing.ts
+// Anthropic per-model pricing in USD per million tokens. Verified directly against
+// https://platform.claude.com/docs/en/about-claude/pricing on 2026-08-20 (base input/output
+// rates; this project uses neither prompt caching nor batch processing). Anthropic can still
+// change published rates after this date — re-verify before relying on these for real budget
+// decisions on a long-running deployment.
+const PRICING_PER_MILLION_TOKENS: Record<string, { input: number; output: number }> = {
+  "claude-haiku-4-5-20251001": { input: 1.0, output: 5.0 },
+  "claude-sonnet-5": { input: 2.0, output: 10.0 },
+  "claude-opus-5": { input: 5.0, output: 25.0 },
+};
+
+export function calculateCostUsd(
+  model: string,
+  inputTokens: number,
+  outputTokens: number,
+): number {
+  const rates = PRICING_PER_MILLION_TOKENS[model];
+  if (!rates) {
+    console.warn(`calculateCostUsd: unrecognized model "${model}", returning $0 cost`);
+    return 0;
+  }
+  return (inputTokens / 1_000_000) * rates.input + (outputTokens / 1_000_000) * rates.output;
+}
+```
+
+```ts
+// tests/pricing.test.ts
+import { describe, it, expect } from "vitest";
+import { calculateCostUsd } from "../agent/lib/pricing";
+
+describe("calculateCostUsd", () => {
+  it("computes cost from input and output tokens at the model's published rates", () => {
+    // 1,000,000 input + 1,000,000 output tokens at Haiku's $1.00/$5.00 per million.
+    expect(calculateCostUsd("claude-haiku-4-5-20251001", 1_000_000, 1_000_000)).toBeCloseTo(6.0);
+  });
+
+  it("scales linearly for partial-million token counts", () => {
+    // 500,000 input tokens at Sonnet's $2.00/million = $1.00; 0 output tokens = $0.
+    expect(calculateCostUsd("claude-sonnet-5", 500_000, 0)).toBeCloseTo(1.0);
+  });
+
+  it("returns 0 for an unknown model rather than throwing", () => {
+    expect(calculateCostUsd("some-unknown-model", 1_000_000, 1_000_000)).toBe(0);
+  });
+});
+```
+
+**Second correction, added during Task 17 after a real incident:** `agent/agent.ts` originally
+had no `limits` configured at all. A live test session ran ~40 unbounded Sonnet steps without
+converging or hitting any cap, because eve's own defaults (`maxInputTokensPerSession`:
+40,000,000; `sessionTimeoutMs`: 30 days) are sized for a much larger class of agent than a
+single bug-fix task — the run never came close to tripping them. Fixed by adding explicit,
+much tighter limits targeting a ~$3 per-session ceiling at Sonnet 5's verified rate:
+`maxInputTokensPerSession: 750_000` (~$1.50), `maxOutputTokensPerSession: 150_000` (~$1.50),
+`sessionTimeoutMs: 7 * 60 * 1000`. See Task 5's `agent/agent.ts` — the actual code now includes
+this `limits` block.
 
 - [ ] **Step 1: Shared model getters**
 
@@ -1043,6 +1168,7 @@ import { defineTool } from "eve/tools";
 import { z } from "zod";
 import { generateObject } from "ai";
 import { haikuModel } from "../lib/anthropic";
+import { calculateCostUsd } from "../lib/pricing";
 import { createRedisStore } from "../lib/store";
 
 const severitySchema = z.object({
@@ -1083,13 +1209,15 @@ export default defineTool({
         "edge-case. Respond with one tight sentence of rationale citing the specific impact.",
       prompt: JSON.stringify({ issueTitle, issueBody, rootCause, reproTestPassed }),
     });
+    const inputTokens = usage.inputTokens ?? 0;
+    const outputTokens = usage.outputTokens ?? 0;
     await store
       .recordModelCall(ctx.session.id, {
         phase: "classify_severity",
         model: "claude-haiku-4-5-20251001",
-        costUsd: usage.costUsd ?? 0,
-        inputTokens: usage.inputTokens ?? 0,
-        outputTokens: usage.outputTokens ?? 0,
+        costUsd: calculateCostUsd("claude-haiku-4-5-20251001", inputTokens, outputTokens),
+        inputTokens,
+        outputTokens,
         at: new Date().toISOString(),
       })
       .catch(() => {});
@@ -1138,7 +1266,7 @@ Expected: no type errors.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add agent/tools/classify_severity.ts agent/lib/anthropic.ts tests/anthropic.test.ts
+git add agent/tools/classify_severity.ts agent/lib/anthropic.ts agent/lib/pricing.ts tests/anthropic.test.ts tests/pricing.test.ts
 git commit -m "feat: add classify_severity tool backed by direct Haiku call"
 ```
 
@@ -1150,6 +1278,7 @@ git commit -m "feat: add classify_severity tool backed by direct Haiku call"
 - Create: `agent/tools/assess_blast_radius.ts`
 
 **Interfaces:**
+- Consumes: `calculateCostUsd` (Task 10's `agent/lib/pricing.ts`) — the raw AI SDK `usage` object has no `costUsd` field (see Task 10's correction note); this tool computes it the same way classify_severity does.
 - Produces: tool `assess_blast_radius`, returns `{ blastRadiusTier: BlastRadiusTier; rationale: string }`.
 
 - [ ] **Step 1: Implement**
@@ -1160,6 +1289,7 @@ import { defineTool } from "eve/tools";
 import { z } from "zod";
 import { generateObject } from "ai";
 import { haikuModel } from "../lib/anthropic";
+import { calculateCostUsd } from "../lib/pricing";
 import { createRedisStore } from "../lib/store";
 
 const blastRadiusSchema = z.object({
@@ -1194,13 +1324,15 @@ export default defineTool({
         "file(s)/pattern that drove the rating in one tight sentence.",
       prompt: JSON.stringify({ filesChanged, diff }),
     });
+    const inputTokens = usage.inputTokens ?? 0;
+    const outputTokens = usage.outputTokens ?? 0;
     await store
       .recordModelCall(ctx.session.id, {
         phase: "assess_blast_radius",
         model: "claude-haiku-4-5-20251001",
-        costUsd: usage.costUsd ?? 0,
-        inputTokens: usage.inputTokens ?? 0,
-        outputTokens: usage.outputTokens ?? 0,
+        costUsd: calculateCostUsd("claude-haiku-4-5-20251001", inputTokens, outputTokens),
+        inputTokens,
+        outputTokens,
         at: new Date().toISOString(),
       })
       .catch(() => {});
@@ -1231,6 +1363,7 @@ git commit -m "feat: add assess_blast_radius tool backed by direct Haiku call"
 - Create: `agent/tools/escalate_to_opus.ts`
 
 **Interfaces:**
+- Consumes: `calculateCostUsd` (Task 10's `agent/lib/pricing.ts`) — see Task 10's correction note on why the raw AI SDK `usage` object can't supply `costUsd` directly.
 - Produces: tool `escalate_to_opus`, returns `{ suggestion: string }` — a text suggestion the primary Sonnet-driven loop applies itself via its normal `read_file`/`write_file`/`bash` tools (this tool never edits files directly).
 
 - [ ] **Step 1: Implement**
@@ -1241,6 +1374,7 @@ import { defineTool } from "eve/tools";
 import { z } from "zod";
 import { generateText } from "ai";
 import { opusModel } from "../lib/anthropic";
+import { calculateCostUsd } from "../lib/pricing";
 import { createRedisStore } from "../lib/store";
 
 const inputSchema = z.object({
@@ -1268,13 +1402,15 @@ export default defineTool({
         "concrete fix as a unified diff or precise file-by-file instructions.",
       prompt: JSON.stringify(input),
     });
+    const inputTokens = usage.inputTokens ?? 0;
+    const outputTokens = usage.outputTokens ?? 0;
     await store
       .recordModelCall(ctx.session.id, {
         phase: "escalate_to_opus",
         model: "claude-opus-5",
-        costUsd: usage.costUsd ?? 0,
-        inputTokens: usage.inputTokens ?? 0,
-        outputTokens: usage.outputTokens ?? 0,
+        costUsd: calculateCostUsd("claude-opus-5", inputTokens, outputTokens),
+        inputTokens,
+        outputTokens,
         at: new Date().toISOString(),
       })
       .catch(() => {});
@@ -1598,7 +1734,11 @@ export default githubChannel({
   // inbound webhook verification, so no GITHUB_APP_ID/PRIVATE_KEY/WEBHOOK_SECRET here.
   credentials: connectGitHubCredentials("github/bug-triage-agent"),
   onIssue: (ctx, issue) => {
-    if (issue.action !== "opened") return null;
+    // Correction, added during Task 17: also dispatch on "reopened", not just "opened" — a
+    // human reopening a bug is a legitimate reason to re-triage it, and this also lets an
+    // already-filed issue (one opened before the GitHub App's `issues` event subscription was
+    // configured) be triggered without needing to be deleted and refiled.
+    if (issue.action !== "opened" && issue.action !== "reopened") return null;
     // The dispatch context (GitHubConversationRef: issueNumber/kind/pullRequestNumber) has no
     // session id yet — the session doesn't exist until eve dispatches this turn. The run's
     // tracking record is created lazily inside classify_severity (Task 10), the first tool call
@@ -1608,14 +1748,27 @@ export default githubChannel({
 });
 ```
 
+**Correction to the plan, discovered during the final whole-branch review:** every
+`/workspace/repo` reference below is corrected to `/workspace` — see Task 6's correction note
+for why (the GitHub channel checks out the repo into `/workspace`, not a custom `/repo`
+subdirectory). An explicit safety prohibition on touching `main` has also been added to phase
+2 below — the plan's own Global Constraint ("Never auto-merge or push directly to main") had no
+corresponding sentence in the model-facing instructions, and this file is the only thing
+governing what the freeform `bash` tool actually does.
+
 - [ ] **Step 3: Write `agent/instructions.md`**
 
 ```md
-You are a bug-triage-and-fix agent for the Vikunja fork checked out at `/workspace/repo`
+You are a bug-triage-and-fix agent for the Vikunja fork checked out at `/workspace`
 (Go backend under `pkg/`, Vue 3 frontend under `frontend/src`). You were triggered by a
 GitHub issue reporting a bug. Work through these phases in order, narrating your findings
 in plain text as you go — your replies are posted as comments on the issue, so write them
 for a developer reading along, not just for yourself.
+
+Never run any git command that pushes, merges, rebases onto, or checks out `main` directly.
+Every change happens on a `fix/issue-<number>` branch, delivered only through the `open_pr`
+tool (which always opens a draft PR, never merges). If a push to your branch fails or is
+rejected, stop and explain the failure in your reply — do not retry against `main`.
 
 ## 0. Load prior context
 
@@ -1628,9 +1781,9 @@ don't rediscover file locations or patterns already documented there.
 2. Reproduce the bug: write a targeted failing test that demonstrates exactly the reported
    behavior.
    - Backend: a Go test in the relevant `pkg/models/*_test.go` file, run with
-     `mage test:filter <TestName>` from `/workspace/repo`.
+     `mage test:filter <TestName>` from `/workspace`.
    - Frontend: a Vitest test alongside the relevant file, run with
-     `cd /workspace/repo/frontend && pnpm test:unit <path>`.
+     `cd /workspace/frontend && pnpm test:unit <path>`.
    Confirm it actually fails on the current code. If you cannot get a failing test to
    reproduce the reported behavior after a reasonable effort, call
    `report_could_not_reproduce` with the issue number/title and what you tried, explain
@@ -1645,21 +1798,21 @@ don't rediscover file locations or patterns already documented there.
 
 ## 2. Solve (only if phase 1 produced a reproducing failing test)
 
-1. Create a branch: `git -C /workspace/repo checkout -b fix/issue-<number>`.
+1. Create a branch: `git -C /workspace checkout -b fix/issue-<number>`.
 2. Edit code until the repro test passes. Then run the full check suite:
    - Backend changes: `mage lint` and `mage test:web` (or `mage test:feature`, whichever
-     covers the touched package) from `/workspace/repo`.
+     covers the touched package) from `/workspace`.
    - Frontend changes: `pnpm lint` and `pnpm typecheck` and `pnpm test:unit` from
-     `/workspace/repo/frontend`.
+     `/workspace/frontend`.
    If you've made 3 attempts and the repro test still doesn't pass, call
    `escalate_to_opus` with the issue, your root cause, every attempted diff, and the last
    test output — then apply its suggestion yourself and re-run the checks. Do not call it
    before 3 genuine attempts.
 3. Once the repro test and full check suite pass, compute the diff stats
-   (`git -C /workspace/repo diff --stat main`) and call `assess_blast_radius` with the
+   (`git -C /workspace diff --stat main`) and call `assess_blast_radius` with the
    diff and changed file list.
-4. Commit and push the branch: `git -C /workspace/repo add -A && git -C /workspace/repo
-   commit -m "fix: <short description>" && git -C /workspace/repo push origin
+4. Commit and push the branch: `git -C /workspace add -A && git -C /workspace
+   commit -m "fix: <short description>" && git -C /workspace push origin
    fix/issue-<number>`.
 5. Call `open_pr` with the issue number, branch name, a PR title/body (include: issue
    link, root cause, the repro test, verification results, blast-radius rationale), and
