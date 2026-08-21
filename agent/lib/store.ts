@@ -56,6 +56,13 @@ export interface BugRun {
   // top-level message.
   slackChannelId?: string;
   slackThreadTs?: string;
+  // The run-tracking.ts session.started placeholder message's own ts (distinct from
+  // slackThreadTs, which anchors the thread) — needed so classify_severity.ts can later edit
+  // that specific message (chat.update) with the real issue number/title, per the design's step
+  // 2. In practice this equals slackThreadTs today (the placeholder is also the thread root), but
+  // kept as its own field so a future change to which message anchors the thread doesn't
+  // silently break the placeholder edit.
+  slackPlaceholderTs?: string;
 }
 
 // Shared with dashboard.ts and run-tracking.ts's cost-cap check — single source of truth for

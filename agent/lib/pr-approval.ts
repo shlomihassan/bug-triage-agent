@@ -1,4 +1,5 @@
 import type { BugRunStore } from "./store";
+import { postToRunThread } from "./slack-notify";
 
 export interface PrClient {
   pulls: {
@@ -25,6 +26,17 @@ export type ResolvePendingPrResult =
 // different behavior. Neither caller needs the original agent session alive: opening a PR is a
 // stateless REST call, and denying just updates the run record (see PendingPr's comment in
 // lib/store.ts for why this bypasses eve's session-based approval entirely).
+//
+// Idempotency: the status guard below (run.status !== "awaiting_approval") is what makes it safe
+// for the dashboard and Slack to click Approve/Deny on the same run concurrently. pendingPr
+// itself can NOT be used as that guard — and can never be cleared to signal "already resolved" —
+// because updateRun's patch is JSON.stringify'd (which drops `undefined` keys) and the Redis Lua
+// merge script (lib/store.ts's UPDATE_RUN_SCRIPT) only assigns keys present in the patch, so
+// there is no way to unset pendingPr through the existing store API. Without this guard, a stale
+// click (e.g. a Slack button clicked after the dashboard already denied the run) would silently
+// re-run the approve/deny logic against an already-resolved run — confirmed as a real bug in
+// review: a dashboard denial followed by a stale Slack approval click would call octokit.pulls
+// .create and overwrite the denial with pr_opened/escalated.
 export async function resolvePendingPr(
   store: BugRunStore,
   runId: string,
@@ -32,6 +44,9 @@ export async function resolvePendingPr(
   octokit: PrClient,
 ): Promise<ResolvePendingPrResult> {
   const run = await store.getRun(runId);
+  if (run?.status !== "awaiting_approval") {
+    return { ok: false, reason: `Run already resolved (${run?.status})` };
+  }
   if (!run?.pendingPr) {
     return { ok: false, reason: "No pendingPr recorded for this run" };
   }
@@ -42,6 +57,9 @@ export async function resolvePendingPr(
       outcome: "denied",
       completedAt: new Date().toISOString(),
     });
+    await postToRunThread(store, runId, { text: "🚫 Denied via dashboard" }).catch((err) =>
+      console.error(`[pr-approval] ✖ Slack post (denied) failed:`, err),
+    );
     return { ok: true, denied: true };
   }
 
@@ -60,5 +78,8 @@ export async function resolvePendingPr(
     outcome: "escalated",
     completedAt: new Date().toISOString(),
   });
+  await postToRunThread(store, runId, {
+    text: `✅ Approved via dashboard — PR opened: ${pr.data.html_url}`,
+  }).catch((err) => console.error(`[pr-approval] ✖ Slack post (approved) failed:`, err));
   return { ok: true, prUrl: pr.data.html_url };
 }

@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { createMemoryStore } from "../agent/lib/store";
 import { resolvePendingPr, type PrClient } from "../agent/lib/pr-approval";
 
@@ -60,9 +60,91 @@ describe("resolvePendingPr", () => {
   it("returns ok:false when the run has no pendingPr", async () => {
     const store = createMemoryStore();
     await store.createRun({ runId: "run-3", issueNumber: 3, issueTitle: "Bug" });
+    // Status must be awaiting_approval for the pendingPr check to even be reached — otherwise
+    // the status guard above it fires first (covered by its own test below).
+    await store.updateRun("run-3", { status: "awaiting_approval" });
 
     const result = await resolvePendingPr(store, "run-3", "approve", fakeOctokit("unused"));
 
     expect(result).toEqual({ ok: false, reason: "No pendingPr recorded for this run" });
+  });
+
+  it("returns ok:false and does not call Octokit when the run is already resolved", async () => {
+    const store = createMemoryStore();
+    await store.createRun({ runId: "run-4", issueNumber: 4, issueTitle: "Bug" });
+    await store.updateRun("run-4", {
+      status: "failed",
+      outcome: "denied",
+      pendingPr, // pendingPr can never be cleared through the store API (see pr-approval.ts) —
+      // it stays set even after the run is resolved, so the guard must key off status, not this.
+    });
+
+    let called = false;
+    const octokit: PrClient = {
+      pulls: {
+        create: async () => {
+          called = true;
+          return { data: { html_url: "unused" } };
+        },
+      },
+    };
+
+    const result = await resolvePendingPr(store, "run-4", "approve", octokit);
+
+    expect(result).toEqual({ ok: false, reason: "Run already resolved (failed)" });
+    expect(called).toBe(false);
+  });
+});
+
+describe("resolvePendingPr Slack posting", () => {
+  beforeEach(() => {
+    process.env.SLACK_BOT_TOKEN = "xoxb-test";
+    process.env.SLACK_CHANNEL_ID = "C123";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ ok: true, ts: "2000.001" }), { status: 200 })),
+    );
+  });
+
+  it("posts an approval outcome to the run's Slack thread on approve", async () => {
+    const store = createMemoryStore();
+    await store.createRun({ runId: "run-5", issueNumber: 5, issueTitle: "Bug" });
+    await store.updateRun("run-5", {
+      status: "awaiting_approval",
+      pendingPr,
+      slackChannelId: "C123",
+      slackThreadTs: "1000.001",
+    });
+
+    await resolvePendingPr(
+      store,
+      "run-5",
+      "approve",
+      fakeOctokit("https://github.com/acme/widgets/pull/9"),
+    );
+
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    const [, init] = fetchMock.mock.calls[0];
+    const body = JSON.parse(init.body as string);
+    expect(body.text).toContain("Approved via dashboard");
+    expect(body.text).toContain("https://github.com/acme/widgets/pull/9");
+  });
+
+  it("posts a denial outcome to the run's Slack thread on deny", async () => {
+    const store = createMemoryStore();
+    await store.createRun({ runId: "run-6", issueNumber: 6, issueTitle: "Bug" });
+    await store.updateRun("run-6", {
+      status: "awaiting_approval",
+      pendingPr,
+      slackChannelId: "C123",
+      slackThreadTs: "1000.001",
+    });
+
+    await resolvePendingPr(store, "run-6", "deny", fakeOctokit("unused"));
+
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    const [, init] = fetchMock.mock.calls[0];
+    const body = JSON.parse(init.body as string);
+    expect(body.text).toContain("Denied via dashboard");
   });
 });
