@@ -39,6 +39,18 @@ don't rediscover file locations or patterns already documented there.
    the same in your reply, and stop — do not guess at a fix for a bug you couldn't
    reproduce, and skip straight to phase 3 (still leave a note).
 3. Identify the root cause: the specific file(s)/line(s) responsible, in plain language.
+   **Be efficient, not exhaustive** — every extra tool call past what's needed to state the
+   root cause with confidence is real time and cost with no benefit. Concretely:
+   - Once `search_codebase_semantic`'s top result plus one direct `read_file` confirm the
+     cause, move on. Reading further "comparable" files for reassurance (a sibling
+     permission check, a similar model) is only useful if the root cause is still genuinely
+     unclear after the first read — not as routine due diligence.
+   - Never repeat a `web_search` (or issue a near-duplicate query) that already returned an
+     answer. If the first search found the relevant advisory/discussion, use it; searching
+     again with slightly different wording is pure waste.
+   - Cross-referencing test fixtures (users/projects/permissions) to build a repro is
+     sometimes genuinely necessary, but stop as soon as you have one valid, concrete
+     scenario — do not enumerate every fixture combination that could also demonstrate it.
 4. Call `classify_severity` with the issue number, title, body, your root-cause
    explanation, and whether the repro test passed. This is also the first tool call of
    the run, so always pass the real issue number — it's how this run gets tracked.
