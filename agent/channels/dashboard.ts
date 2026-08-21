@@ -1,5 +1,7 @@
 import { defineChannel, GET, POST } from "eve/channels";
 import { createRedisStore, totalCost, tokenTotals, type BugRun } from "../lib/store";
+import { loadConfig } from "../lib/config";
+import githubChannel from "./github";
 
 const TERMINAL_STATUSES: BugRun["status"][] = ["pr_opened", "failed"];
 
@@ -173,6 +175,36 @@ export default defineChannel({
         reason: "manual reset after sandbox snapshot storage cleanup",
       });
       return new Response(JSON.stringify(result), {
+        headers: { "content-type": "application/json" },
+      });
+    }),
+    // Temporary operator tooling: resolves a paused open_pr approval (agent/tools/open_pr.ts's
+    // requiresApproval gate) directly, bypassing the GitHub-comment path. Needed because the
+    // GitHub channel (agent/channels/github.ts) only defines onIssue — it neither posts the
+    // pending approval question as a visible comment, nor defines onComment to dispatch a
+    // human's reply — so there is currently no way to approve/deny from the issue thread
+    // itself. This exists to unblock a specific paused run in the meantime; the real fix is
+    // wiring onComment + surfacing approval questions as GitHub comments. Safe to delete once
+    // that's done.
+    POST("/dashboard/admin/resolve-approval", async (req, { receive }) => {
+      if (req.headers.get("x-admin-secret") !== process.env.ADMIN_RESET_SECRET) {
+        return new Response("Forbidden", { status: 403 });
+      }
+      const url = new URL(req.url);
+      const issueNumberRaw = url.searchParams.get("issueNumber");
+      const decision = url.searchParams.get("decision");
+      if (!issueNumberRaw || (decision !== "approve" && decision !== "deny")) {
+        return new Response("issueNumber and decision=approve|deny query params required", {
+          status: 400,
+        });
+      }
+      const { githubOwner, githubRepo } = loadConfig();
+      const session = await receive(githubChannel, {
+        message: decision,
+        target: { owner: githubOwner, repo: githubRepo, issueNumber: Number(issueNumberRaw) },
+        auth: null,
+      });
+      return new Response(JSON.stringify({ sessionId: session.id }), {
         headers: { "content-type": "application/json" },
       });
     }),
