@@ -51,6 +51,11 @@ export interface BugRun {
   completedAt?: string;
   modelCalls: ModelCallRecord[];
   pendingPr?: PendingPr;
+  // Set the first time a Slack message is posted for this run (agent/lib/slack-notify.ts).
+  // slackThreadTs anchors every later message for the run as a threaded reply instead of a new
+  // top-level message.
+  slackChannelId?: string;
+  slackThreadTs?: string;
 }
 
 // Shared with dashboard.ts and run-tracking.ts's cost-cap check — single source of truth for
