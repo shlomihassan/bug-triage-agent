@@ -135,6 +135,14 @@ export default defineTool({
   inputSchema,
   outputSchema,
   async execute({ symbolName, direction, depth, file }) {
+    // Temporary diagnostic bypass — see the matching comment in search_codebase_semantic.ts.
+    // Tests whether this tool's Neon access (a possibly-stale pooled connection reused across
+    // durable-workflow steps) is what's crashing execution mid-step tonight.
+    if (process.env.DISABLE_CODE_INTEL_DB === "true") {
+      console.log(`[query_code_graph] ⏭ DISABLE_CODE_INTEL_DB set — skipping Neon entirely`);
+      return { matches: [], note: "Call graph lookup temporarily disabled for diagnosis; fall back to grep/read" };
+    }
+
     if (!process.env.DATABASE_URL_UNPOOLED) {
       return { matches: [], note: "Code intelligence database not configured; fall back to grep/read" };
     }

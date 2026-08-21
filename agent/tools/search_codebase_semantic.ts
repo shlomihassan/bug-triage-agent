@@ -44,6 +44,18 @@ export default defineTool({
     topK: z.number().int().min(1).max(20).default(10),
   }),
   async execute({ query, topK }) {
+    // Temporary diagnostic bypass: tonight's silent stalls correlate with a workflow-sdk log
+    // reading "a previous delivery crashed mid-body" — a real crash inside a step, not a slow
+    // query. neon-db.ts keeps a `pg.Pool` singleton at module scope; if a step's underlying
+    // compute gets recycled between durable-workflow steps, reusing a stale pooled connection
+    // on the next step is a known way to crash serverless code exactly like this. Short-circuit
+    // here to test whether removing all Neon access from this tool stops the crash-and-redeliver
+    // pattern. Remove DISABLE_CODE_INTEL_DB once the real cause is confirmed either way.
+    if (process.env.DISABLE_CODE_INTEL_DB === "true") {
+      console.log(`[search_codebase_semantic] ⏭ DISABLE_CODE_INTEL_DB set — skipping Neon entirely`);
+      return { matches: [], note: "Semantic search temporarily disabled for diagnosis; fall back to grep/read" };
+    }
+
     const apiKey = process.env.VOYAGE_API_KEY;
     if (!apiKey) {
       return { matches: [], note: "VOYAGE_API_KEY not configured; fall back to grep/read" };
