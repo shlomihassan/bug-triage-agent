@@ -8,16 +8,21 @@ import { defaultBackend } from "eve/sandbox";
 //    '/workspace'" because the sandbox volume's UID doesn't match the process UID. It has to
 //    happen before the GitHub channel's first checkout runs.
 //
-// 2. Populate /workspace *only when it is empty*. On a GitHub-triggered turn eve's GitHub
-//    channel (agent/channels/github.ts) has already cloned the repo, authenticated — a second
-//    unconditional clone here would be wrong, which is what the original Task 6 correction note
-//    warned about. But a turn started any other way (`eve invoke`, `eve dev`, an eval) never
-//    goes through that channel, so nothing checks the repo out and the agent spends its whole
-//    budget spelunking an empty directory. That was not hypothetical: the first successful local
-//    run did exactly that, with `git log` exiting 128 against an empty /workspace.
-//
-//    The emptiness guard is what keeps both paths correct: a no-op when the channel already
-//    checked out, a shallow clone when nothing did.
+// 2. Populate /workspace *only outside Vercel*. `onSession` fires when the sandbox SESSION
+//    opens, before any TURN starts — the GitHub channel's own authenticated checkout (Eve's
+//    `checkoutRepositoryForTurn`, called from its `turn.started` handler) runs strictly later.
+//    An earlier version of this file gated on "/workspace is empty," reasoning that would be a
+//    no-op once the channel had already checked out — but /workspace is *always* empty at
+//    onSession time regardless of channel, since the channel's checkout hasn't run yet. That
+//    guard never actually protected anything on a GitHub-triggered run: this code would clone
+//    unauthenticated into /workspace first, and the channel's own checkout would then run
+//    against a directory it didn't create, with a remote it doesn't control — precisely the
+//    dual-checkout conflict the original Task 6 correction note warned about, just introduced
+//    by fixing the wrong condition. Gating on `!process.env.VERCEL` instead is correct because
+//    it names the actual distinguishing fact: only a non-Vercel invocation (`eve invoke`,
+//    `eve dev`, an eval) has no channel to do this at all. That was not hypothetical — the
+//    first successful local run spelunked an empty /workspace, `git log` exiting 128, before
+//    this existed.
 const OWNER = process.env.GITHUB_OWNER ?? "shlomihassan";
 const REPO = process.env.GITHUB_REPO ?? "vikunja";
 
@@ -36,9 +41,17 @@ export default defineSandbox({
     const sandbox = await use();
     await sandbox.run({ command: "git config --global --add safe.directory /workspace" });
 
-    // `git clone` refuses a non-empty target, so the guard is also what makes this safe to
-    // retry. A shallow clone keeps a cold start to seconds rather than minutes; the agent only
-    // ever reads history one commit deep.
+    if (process.env.VERCEL) {
+      // On Vercel the GitHub channel owns /workspace entirely — nothing to do here. Cloning
+      // now would race its later, authenticated checkout against a directory this code
+      // populated first with the wrong remote.
+      return;
+    }
+
+    // Local-only: no channel means nothing else will ever populate /workspace. `git clone`
+    // refuses a non-empty target, so this stays safe to retry across repeated `eve invoke`
+    // calls against the same sandbox. A shallow clone keeps a cold start to seconds; the
+    // agent only ever reads history one commit deep.
     const clone = await sandbox.run({
       command:
         `if [ -d /workspace/.git ] || [ -n "$(ls -A /workspace 2>/dev/null)" ]; then ` +
