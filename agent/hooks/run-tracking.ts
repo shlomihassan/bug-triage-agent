@@ -1,8 +1,15 @@
 import { defineHook } from "eve/hooks";
 import { createRedisStore } from "../lib/store";
+import { SESSION_TIMEOUT_MS } from "../agent";
 
 const store = createRedisStore();
 const TERMINAL_STATUSES = new Set(["pr_opened", "failed", "escalated"]);
+// Trigger the graceful kill at 90% of the real deadline. eve enforces sessionTimeoutMs through
+// a separate, out-of-band sessionTimeoutWorkflow that force-kills the session directly — that
+// kill was found live tonight not to reliably reach session.completed/session.failed (kept
+// below as a backstop, but not trusted as the primary mechanism). Racing a graceful stop against
+// an unpredictable hard kill needs real margin, not a hair's-breadth cutoff.
+const GRACEFUL_KILL_AT_MS = SESSION_TIMEOUT_MS * 0.9;
 
 // A session that times out (agent.ts's sessionTimeoutMs) or otherwise ends without reaching a
 // real terminal state currently shows up on Vercel's own Agent Runs list as "Completed" — not
@@ -25,8 +32,40 @@ async function markIncompleteIfNeverFinished(sessionId: string): Promise<void> {
     });
 }
 
+// Best-effort proactive cancel. Reuses the same session.cancel() path the dashboard's own Stop
+// button already calls (agent/channels/dashboard.ts) via a self-HTTP-call, rather than a second,
+// unverified way of stopping a session — that route is the one piece of stop functionality
+// already proven working live. Deliberately non-fatal: if this fails (network hiccup, cold
+// start), markIncompleteIfNeverFinished has already fixed the dashboard's visibility of the
+// problem regardless, and eve's own hard kill still lands eventually as the final backstop.
+async function requestGracefulCancel(sessionId: string): Promise<void> {
+  const host = process.env.VERCEL_URL;
+  if (!host) return; // No self-callable URL outside Vercel (e.g. local `eve invoke`).
+  await fetch(`https://${host}/dashboard/${sessionId}/stop`, { method: "POST" }).catch((err) => {
+    console.error(`[run-tracking] ✖ graceful cancel request failed:`, err);
+  });
+}
+
 export default defineHook({
   events: {
+    // step.completed is known to fire reliably for the duration of a session — it's what has
+    // been powering the live cost tracking on /dashboard all night (agent/hooks/cost-tracking.ts)
+    // — unlike session.completed/session.failed, which a hard timeout kill does not reliably
+    // reach. Checking elapsed time here, on every step, is what actually catches an
+    // about-to-time-out run while the session is still alive to be gracefully stopped, instead
+    // of only ever finding out about it after an external, unpredictable kill already happened.
+    async "step.completed"(_event, ctx) {
+      const run = await store.getRun(ctx.session.id).catch(() => null);
+      if (!run || TERMINAL_STATUSES.has(run.status)) return;
+      const elapsedMs = Date.now() - new Date(run.startedAt).getTime();
+      if (elapsedMs < GRACEFUL_KILL_AT_MS) return;
+      console.log(
+        `[run-tracking] ⏱ session ${ctx.session.id} at ${Math.round(elapsedMs / 1000)}s ` +
+          `(>= ${Math.round(GRACEFUL_KILL_AT_MS / 1000)}s threshold) — marking failed and requesting cancel`,
+      );
+      await markIncompleteIfNeverFinished(ctx.session.id);
+      await requestGracefulCancel(ctx.session.id);
+    },
     async "session.started"(_event, ctx) {
       // Creates a placeholder row the instant a session starts, so /dashboard shows "something
       // is running" from the first moment instead of nothing at all until classify_severity
