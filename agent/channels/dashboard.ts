@@ -1,13 +1,9 @@
 import { defineChannel, GET, POST } from "eve/channels";
-import { createRedisStore, type BugRun } from "../lib/store";
+import { createRedisStore, totalCost, type BugRun } from "../lib/store";
 
 const TERMINAL_STATUSES: BugRun["status"][] = ["pr_opened", "failed"];
 
 const store = createRedisStore();
-
-function totalCost(run: BugRun): number {
-  return run.modelCalls.reduce((sum, call) => sum + call.costUsd, 0);
-}
 
 function escapeHtml(value: string): string {
   return value

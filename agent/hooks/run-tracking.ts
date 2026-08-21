@@ -1,5 +1,5 @@
 import { defineHook } from "eve/hooks";
-import { createRedisStore } from "../lib/store";
+import { createRedisStore, totalCost } from "../lib/store";
 import { SESSION_TIMEOUT_MS } from "../agent";
 
 const store = createRedisStore();
@@ -11,20 +11,32 @@ const TERMINAL_STATUSES = new Set(["pr_opened", "failed", "escalated"]);
 // an unpredictable hard kill needs real margin, not a hair's-breadth cutoff.
 const GRACEFUL_KILL_AT_MS = SESSION_TIMEOUT_MS * 0.9;
 
-// A session that times out (agent.ts's sessionTimeoutMs) or otherwise ends without reaching a
-// real terminal state currently shows up on Vercel's own Agent Runs list as "Completed" — not
-// "Failed" — because from eve's perspective the session did end cleanly, it just never produced
-// a useful result. Confirmed live tonight: every stalled run showed status "Completed" there.
-// Without this, our own dashboard would show such a run stuck at "triaging" forever, which reads
-// identically to "still actively working" — exactly the ambiguity that cost hours of guessing.
-async function markIncompleteIfNeverFinished(sessionId: string): Promise<void> {
+// Real data (2026-08-21): three real GitHub-triggered runs (#14/#16/#17) each spent their full
+// time budget — $3.14, $5.13, $5.23 — without ever reaching open_pr. 100% waste, 3/3. A time
+// cutoff alone doesn't stop a run that's genuinely still working step-by-step but just never
+// converging; this catches that case directly, on spend rather than wall-clock time, so a
+// non-converging run stops costing money well before it would otherwise burn its full 25-minute
+// allowance for zero deliverable.
+const COST_CAP_USD = 3.0;
+
+// A session that times out (agent.ts's sessionTimeoutMs), exceeds the cost cap, or otherwise
+// ends without reaching a real terminal state currently shows up on Vercel's own Agent Runs list
+// as "Completed" — not "Failed" — because from eve's perspective the session did end cleanly, it
+// just never produced a useful result. Confirmed live tonight: every stalled run showed status
+// "Completed" there. Without this, our own dashboard would show such a run stuck at "triaging"
+// forever, which reads identically to "still actively working" — exactly the ambiguity that cost
+// hours of guessing.
+async function markIncompleteIfNeverFinished(
+  sessionId: string,
+  outcome: "timed_out" | "cost_capped",
+): Promise<void> {
   const run = await store.getRun(sessionId).catch(() => null);
   if (!run) return;
   if (TERMINAL_STATUSES.has(run.status)) return;
   await store
     .updateRun(sessionId, {
       status: "failed",
-      outcome: "timed_out",
+      outcome,
       completedAt: new Date().toISOString(),
     })
     .catch((err) => {
@@ -57,13 +69,25 @@ export default defineHook({
     async "step.completed"(_event, ctx) {
       const run = await store.getRun(ctx.session.id).catch(() => null);
       if (!run || TERMINAL_STATUSES.has(run.status)) return;
+
+      const spend = totalCost(run);
+      if (spend >= COST_CAP_USD) {
+        console.log(
+          `[run-tracking] 💸 session ${ctx.session.id} spent $${spend.toFixed(2)} ` +
+            `(>= $${COST_CAP_USD.toFixed(2)} cap) — marking failed and requesting cancel`,
+        );
+        await markIncompleteIfNeverFinished(ctx.session.id, "cost_capped");
+        await requestGracefulCancel(ctx.session.id);
+        return;
+      }
+
       const elapsedMs = Date.now() - new Date(run.startedAt).getTime();
       if (elapsedMs < GRACEFUL_KILL_AT_MS) return;
       console.log(
         `[run-tracking] ⏱ session ${ctx.session.id} at ${Math.round(elapsedMs / 1000)}s ` +
           `(>= ${Math.round(GRACEFUL_KILL_AT_MS / 1000)}s threshold) — marking failed and requesting cancel`,
       );
-      await markIncompleteIfNeverFinished(ctx.session.id);
+      await markIncompleteIfNeverFinished(ctx.session.id, "timed_out");
       await requestGracefulCancel(ctx.session.id);
     },
     async "session.started"(_event, ctx) {
@@ -88,10 +112,13 @@ export default defineHook({
     // Fires on every session end, including a clean timeout — which is exactly the case that
     // needs catching, since "Completed" here does not imply anything useful happened.
     async "session.completed"(_event, ctx) {
-      await markIncompleteIfNeverFinished(ctx.session.id);
+      // Reason is unknown at this generic backstop (unlike step.completed's targeted checks
+      // above); "timed_out" is the more common real cause in practice, but this is a fallback
+      // path, not the primary mechanism — see the module comment on why it isn't fully trusted.
+      await markIncompleteIfNeverFinished(ctx.session.id, "timed_out");
     },
     async "session.failed"(_event, ctx) {
-      await markIncompleteIfNeverFinished(ctx.session.id);
+      await markIncompleteIfNeverFinished(ctx.session.id, "timed_out");
     },
   },
 });

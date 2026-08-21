@@ -17,11 +17,17 @@ export interface BugRun {
   status: "triaging" | "fixing" | "awaiting_approval" | "pr_opened" | "escalated" | "failed";
   severity?: Severity;
   blastRadiusTier?: BlastRadiusTier;
-  outcome?: "auto_resolved" | "escalated" | "could_not_reproduce" | "timed_out" | "cancelled";
+  outcome?: "auto_resolved" | "escalated" | "could_not_reproduce" | "timed_out" | "cancelled" | "cost_capped";
   prUrl?: string;
   startedAt: string;
   completedAt?: string;
   modelCalls: ModelCallRecord[];
+}
+
+// Shared with dashboard.ts and run-tracking.ts's cost-cap check — single source of truth for
+// how a run's spend is computed, rather than each caller re-summing modelCalls independently.
+export function totalCost(run: BugRun): number {
+  return run.modelCalls.reduce((sum, call) => sum + call.costUsd, 0);
 }
 
 export interface BugRunStore {

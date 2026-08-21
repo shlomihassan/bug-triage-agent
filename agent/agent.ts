@@ -30,11 +30,24 @@ import { anthropic } from "@ai-sdk/anthropic";
 // than the graceful-mark-off racing the hard kill.
 export const SESSION_TIMEOUT_MS = 25 * 60 * 1000;
 
+// Cost analysis (2026-08-21, run #16 real data): 49 model calls, 2,507,396 total input tokens,
+// $5.13, and 99.98% of that cost was input tokens, not output. Per-call input tokens grew
+// ~1,315/call, from 11,525 to 74,665 — the whole conversation is resent on every step, so cost
+// grows worse than linearly with call count. eve already ships a fix for exactly this
+// (harness/compaction.js: summarizes older turns into a checkpoint once the live conversation
+// crosses thresholdPercent of the model's context window) but it never fired all night: eve's
+// default is 0.9 (90% of Sonnet's ~200K window, ~180K tokens) and no run's live conversation
+// got anywhere near that — #16's largest call was 74,665 tokens, ~37% of the window. Lowering
+// the threshold makes compaction actually engage during a normal-length session instead of only
+// protecting against genuinely runaway ones.
 export default defineAgent({
   model: anthropic("claude-sonnet-5"),
   limits: {
     maxInputTokensPerSession: 2_500_000,
     maxOutputTokensPerSession: 500_000,
     sessionTimeoutMs: SESSION_TIMEOUT_MS,
+  },
+  compaction: {
+    thresholdPercent: 0.2,
   },
 });
