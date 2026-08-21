@@ -92,6 +92,37 @@ export function createRedisStore(): BugRunStore {
 
   const redis = new Redis({ url, token });
 
+  // Both updateRun and recordModelCall used to do GET-then-SET across two separate REST round
+  // trips — a classic non-atomic read-modify-write. Confirmed live tonight as a real bug, not a
+  // theoretical one: eve's own step redelivery (the "crashed mid-body, redelivering" pattern
+  // seen earlier the same night) causes genuine concurrent execution of the same logical step,
+  // and two racing GET-then-SET calls silently clobber each other — whichever SET lands last
+  // wins, discarding the other's write entirely. Directly observed: a run ended with
+  // status="awaiting_approval" and outcome="cost_capped" simultaneously, an inconsistent
+  // combination no single code path ever writes, and recordModelCall's identical pattern means
+  // a concurrent cost record could just as easily vanish rather than merely showing a corrupted
+  // status. Both scripts run entirely server-side — Redis executes a Lua script as one atomic
+  // operation, so no other command can interleave partway through, closing the race window
+  // completely rather than narrowing it.
+  const UPDATE_RUN_SCRIPT = `
+    local current = redis.call('GET', KEYS[1])
+    if not current then return redis.error_reply('Unknown run') end
+    local run = cjson.decode(current)
+    local patch = cjson.decode(ARGV[1])
+    for k, v in pairs(patch) do run[k] = v end
+    local merged = cjson.encode(run)
+    redis.call('SET', KEYS[1], merged)
+    return merged
+  `;
+  const RECORD_MODEL_CALL_SCRIPT = `
+    local current = redis.call('GET', KEYS[1])
+    if not current then return redis.error_reply('Unknown run') end
+    local run = cjson.decode(current)
+    table.insert(run.modelCalls, cjson.decode(ARGV[1]))
+    local merged = cjson.encode(run)
+    redis.call('SET', KEYS[1], merged)
+    return merged
+  `;
 
   return {
     async createRun({ runId, issueNumber, issueTitle }) {
@@ -117,15 +148,27 @@ export function createRedisStore(): BugRunStore {
       }
     },
     async updateRun(runId, patch) {
-      const run = await redis.get<BugRun>(RUN_KEY(runId));
-      if (!run) throw new Error(`Unknown run ${runId}`);
-      await redis.set(RUN_KEY(runId), { ...run, ...patch });
+      try {
+        await redis.eval(UPDATE_RUN_SCRIPT, [RUN_KEY(runId)], [JSON.stringify(patch)]);
+      } catch (err) {
+        // The script's redis.error_reply('Unknown run') surfaces here as a thrown error whose
+        // message contains that text — normalize it to the same error shape callers already
+        // expect from the pre-atomic implementation.
+        if (err instanceof Error && err.message.includes("Unknown run")) {
+          throw new Error(`Unknown run ${runId}`);
+        }
+        throw err;
+      }
     },
     async recordModelCall(runId, call) {
-      const run = await redis.get<BugRun>(RUN_KEY(runId));
-      if (!run) throw new Error(`Unknown run ${runId}`);
-      run.modelCalls.push(call);
-      await redis.set(RUN_KEY(runId), run);
+      try {
+        await redis.eval(RECORD_MODEL_CALL_SCRIPT, [RUN_KEY(runId)], [JSON.stringify(call)]);
+      } catch (err) {
+        if (err instanceof Error && err.message.includes("Unknown run")) {
+          throw new Error(`Unknown run ${runId}`);
+        }
+        throw err;
+      }
     },
     async getRun(runId) {
       return (await redis.get<BugRun>(RUN_KEY(runId))) ?? null;
