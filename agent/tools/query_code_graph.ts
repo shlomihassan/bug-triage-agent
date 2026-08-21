@@ -139,11 +139,16 @@ export default defineTool({
       return { matches: [], note: "Code intelligence database not configured; fall back to grep/read" };
     }
 
+    console.log(`[query_code_graph] symbol="${symbolName}" direction=${direction} depth=${depth} file=${file ?? "-"}`);
+    const startedAt = Date.now();
     try {
       const result = await findRelatedSymbols({ symbolName, direction, depth, file });
+      console.log(
+        `[query_code_graph] ✅ ${result.matches.length} matches in ${Date.now() - startedAt}ms`,
+      );
       return result;
     } catch (err) {
-      console.error("Query failed:", err);
+      console.error(`[query_code_graph] ✖ failed after ${Date.now() - startedAt}ms:`, err);
       return { matches: [], note: "Query failed; fall back to grep/read" };
     }
   },
