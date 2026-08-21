@@ -19,6 +19,18 @@ export function parseApprovalAction(action: {
   return { runId, decision };
 }
 
+export function parseApproverAllowlist(envValue: string | undefined): string[] {
+  if (!envValue || envValue.trim() === "") return [];
+  return envValue
+    .split(",")
+    .map((id) => id.trim())
+    .filter((id) => id.length > 0);
+}
+
+export function isAuthorizedApprover(userId: string, allowlist: readonly string[]): boolean {
+  return allowlist.includes(userId);
+}
+
 export default slackChannel({
   // Provisioned via `vercel connect create slack --triggers` under the UID
   // "slack/bug-triage-agent" (see docs/superpowers/specs/2026-08-21-slack-integration-design.md
@@ -34,6 +46,42 @@ export default slackChannel({
   async onInteraction(action, ctx) {
     const parsed = parseApprovalAction(action);
     if (!parsed) return;
+
+    // Check authorization: restrict approval to allowlist of specific Slack user IDs
+    const allowlist = parseApproverAllowlist(process.env.SLACK_APPROVER_IDS);
+    if (allowlist.length === 0) {
+      console.error("[slack] ✖ SLACK_APPROVER_IDS is unset or empty — approval denied");
+      const outcomeText = `⛔ Approval/denial is misconfigured (missing allowlist). Contact an admin.`;
+      try {
+        await ctx.slack.request("chat.update", {
+          channel: ctx.slack.channelId,
+          ts: action.messageTs,
+          text: outcomeText,
+          blocks: [{ type: "section", text: { type: "mrkdwn", text: outcomeText } }],
+        });
+      } catch (err) {
+        console.error("[slack] ✖ chat.update for misconfiguration error threw:", err);
+      }
+      return;
+    }
+
+    if (!isAuthorizedApprover(action.user.id, allowlist)) {
+      console.warn(
+        `[slack] Approval/denial attempt by unauthorized user <@${action.user.id}> rejected`
+      );
+      const outcomeText = `⛔ <@${action.user.id}> is not authorized to approve/deny this fix.`;
+      try {
+        await ctx.slack.request("chat.update", {
+          channel: ctx.slack.channelId,
+          ts: action.messageTs,
+          text: outcomeText,
+          blocks: [{ type: "section", text: { type: "mrkdwn", text: outcomeText } }],
+        });
+      } catch (err) {
+        console.error("[slack] ✖ chat.update for authorization rejection threw:", err);
+      }
+      return;
+    }
 
     const octokit = new Octokit({ auth: process.env.GITHUB_PR_TOKEN });
     const result = await resolvePendingPr(store, parsed.runId, parsed.decision, octokit);
