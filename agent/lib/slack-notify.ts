@@ -49,9 +49,9 @@ export async function postToRunThread(
         blocks: message.blocks,
       }),
     });
-    const body = (await response.json()) as { ok: boolean; ts?: string; error?: string };
+    const body = (await response.json()) as { ok: boolean; ts?: string; error?: string; response_metadata?: unknown };
     if (!body.ok) {
-      console.error(`[slack-notify] ✖ chat.postMessage failed: ${body.error}`);
+      console.error(`[slack-notify] ✖ chat.postMessage failed: ${body.error} ${JSON.stringify(body.response_metadata)}`);
       return undefined;
     }
     if (!run.slackThreadTs && body.ts) {

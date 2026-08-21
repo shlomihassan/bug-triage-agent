@@ -94,6 +94,31 @@ describe("resolvePendingPr", () => {
     expect(result).toEqual({ ok: false, reason: "Run already resolved (failed)" });
     expect(called).toBe(false);
   });
+
+  it("returns ok:false when Octokit rejects the PR-create call, instead of throwing", async () => {
+    const store = createMemoryStore();
+    await store.createRun({ runId: "run-7", issueNumber: 7, issueTitle: "Bug" });
+    await store.updateRun("run-7", { status: "awaiting_approval", pendingPr });
+
+    const octokit: PrClient = {
+      pulls: {
+        create: async () => {
+          throw new Error('Validation Failed: {"resource":"PullRequest","field":"head","code":"invalid"}');
+        },
+      },
+    };
+
+    const result = await resolvePendingPr(store, "run-7", "approve", octokit);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toContain("Failed to open PR");
+      expect(result.reason).toContain("invalid");
+    }
+    // The run must stay in a sane, unresolved state — a failed Octokit call must not corrupt it.
+    const run = await store.getRun("run-7");
+    expect(run?.status).toBe("awaiting_approval");
+  });
 });
 
 describe("resolvePendingPr Slack posting", () => {
@@ -126,7 +151,7 @@ describe("resolvePendingPr Slack posting", () => {
     const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
     const [, init] = fetchMock.mock.calls[0];
     const body = JSON.parse(init.body as string);
-    expect(body.text).toContain("Approved via dashboard");
+    expect(body.text).toContain("Approved");
     expect(body.text).toContain("https://github.com/acme/widgets/pull/9");
   });
 
@@ -145,6 +170,6 @@ describe("resolvePendingPr Slack posting", () => {
     const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
     const [, init] = fetchMock.mock.calls[0];
     const body = JSON.parse(init.body as string);
-    expect(body.text).toContain("Denied via dashboard");
+    expect(body.text).toContain("Denied");
   });
 });

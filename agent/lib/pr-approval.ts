@@ -57,21 +57,36 @@ export async function resolvePendingPr(
       outcome: "denied",
       completedAt: new Date().toISOString(),
     });
-    await postToRunThread(store, runId, { text: "🚫 Denied via dashboard" }).catch((err) =>
+    await postToRunThread(store, runId, { text: "🚫 Denied" }).catch((err) =>
       console.error(`[pr-approval] ✖ Slack post (denied) failed:`, err),
     );
     return { ok: true, denied: true };
   }
 
-  const pr = await octokit.pulls.create({
-    owner: run.pendingPr.owner,
-    repo: run.pendingPr.repo,
-    title: run.pendingPr.title,
-    body: run.pendingPr.body,
-    head: run.pendingPr.branch,
-    base: "main",
-    draft: true,
-  });
+  // Confirmed live (2026-08-21): a real GitHub API rejection here (invalid branch, permissions,
+  // rate limit) previously propagated as an uncaught exception out of Slack's onInteraction
+  // handler ("custom interaction handler failed"), leaving the click with no user-facing
+  // feedback at all — the run stayed correctly at awaiting_approval (nothing corrupted, since
+  // this throw happens before any updateRun call below), but the human had no way to know their
+  // click didn't work. Catching it here means both callers (dashboard route, Slack
+  // onInteraction) get a normal { ok: false, reason } instead of a thrown error to handle
+  // themselves — one failure-reporting path instead of two.
+  let pr: { data: { html_url: string } };
+  try {
+    pr = await octokit.pulls.create({
+      owner: run.pendingPr.owner,
+      repo: run.pendingPr.repo,
+      title: run.pendingPr.title,
+      body: run.pendingPr.body,
+      head: run.pendingPr.branch,
+      base: "main",
+      draft: true,
+    });
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    console.error(`[pr-approval] ✖ octokit.pulls.create failed for ${runId}:`, err);
+    return { ok: false, reason: `Failed to open PR: ${reason}` };
+  }
   await store.updateRun(runId, {
     status: "pr_opened",
     prUrl: pr.data.html_url,
@@ -79,7 +94,7 @@ export async function resolvePendingPr(
     completedAt: new Date().toISOString(),
   });
   await postToRunThread(store, runId, {
-    text: `✅ Approved via dashboard — PR opened: ${pr.data.html_url}`,
+    text: `✅ Approved — PR opened: ${pr.data.html_url}`,
   }).catch((err) => console.error(`[pr-approval] ✖ Slack post (approved) failed:`, err));
   return { ok: true, prUrl: pr.data.html_url };
 }

@@ -77,14 +77,17 @@ export default defineTool({
             elements: [
               {
                 type: "button",
-                action_id: "resolve_pr",
+                // Slack rejects a message where two elements share one action_id — confirmed
+                // live against the real API ("action_id \"resolve_pr\" already exists").
+                // agent/channels/slack.ts's parseApprovalAction accepts both of these.
+                action_id: "resolve_pr_approve",
                 text: { type: "plain_text", text: "Approve" },
                 style: "primary",
                 value: `${ctx.session.id}:approve`,
               },
               {
                 type: "button",
-                action_id: "resolve_pr",
+                action_id: "resolve_pr_deny",
                 text: { type: "plain_text", text: "Deny" },
                 style: "danger",
                 value: `${ctx.session.id}:deny`,

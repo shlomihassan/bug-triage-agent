@@ -6,11 +6,18 @@ import { resolvePendingPr } from "../lib/pr-approval";
 
 const store = createRedisStore();
 
+// Slack rejects a message whose blocks contain two elements sharing one action_id
+// ("[ERROR] `action_id` ... already exists", confirmed live against the real API) — so the
+// Approve/Deny buttons must use two distinct action_ids, not one shared one distinguished only
+// by `value`. Both are still accepted here; decision is read from `value`, not from which
+// action_id fired, so this stays a single parse path for both buttons.
+const APPROVAL_ACTION_IDS = new Set(["resolve_pr_approve", "resolve_pr_deny"]);
+
 export function parseApprovalAction(action: {
   readonly actionId: string;
   readonly value?: string;
 }): { runId: string; decision: "approve" | "deny" } | null {
-  if (action.actionId !== "resolve_pr" || !action.value) return null;
+  if (!APPROVAL_ACTION_IDS.has(action.actionId) || !action.value) return null;
   const separatorIndex = action.value.lastIndexOf(":");
   if (separatorIndex <= 0) return null;
   const runId = action.value.slice(0, separatorIndex);
