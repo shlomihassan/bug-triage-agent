@@ -1,22 +1,21 @@
 import { defineHook } from "eve/hooks";
 import { createRedisStore, totalCost } from "../lib/store";
-import { SESSION_TIMEOUT_MS } from "../agent";
 
 const store = createRedisStore();
 const TERMINAL_STATUSES = new Set(["pr_opened", "failed", "escalated"]);
-// Trigger the graceful kill at 90% of the real deadline. eve enforces sessionTimeoutMs through
-// a separate, out-of-band sessionTimeoutWorkflow that force-kills the session directly — that
-// kill was found live tonight not to reliably reach session.completed/session.failed (kept
-// below as a backstop, but not trusted as the primary mechanism). Racing a graceful stop against
-// an unpredictable hard kill needs real margin, not a hair's-breadth cutoff.
-const GRACEFUL_KILL_AT_MS = SESSION_TIMEOUT_MS * 0.9;
 
 // Real data (2026-08-21): three real GitHub-triggered runs (#14/#16/#17) each spent their full
 // time budget — $3.14, $5.13, $5.23 — without ever reaching open_pr. 100% waste, 3/3. A time
 // cutoff alone doesn't stop a run that's genuinely still working step-by-step but just never
-// converging; this catches that case directly, on spend rather than wall-clock time, so a
-// non-converging run stops costing money well before it would otherwise burn its full 25-minute
-// allowance for zero deliverable.
+// converging; this catches that case directly, on spend rather than wall-clock time.
+//
+// This is now the ONLY proactive stop mechanism — a prior version also killed a run at 90% of
+// agent.ts's sessionTimeoutMs, but with cost-tracking.ts's field-name bug fixed and real caching
+// confirmed working, cost is the fairer signal: a cache-heavy run doing legitimate work can
+// safely run long, while a run burning fresh tokens fast should stop sooner regardless of clock
+// time. agent.ts's sessionTimeoutMs (25 min) still exists as eve's own absolute last-resort
+// backstop for a session that hangs without ever completing a step at all — but it is no longer
+// something this hook proactively races against.
 const COST_CAP_USD = 3.0;
 
 // A session that times out (agent.ts's sessionTimeoutMs), exceeds the cost cap, or otherwise
@@ -63,31 +62,20 @@ export default defineHook({
     // step.completed is known to fire reliably for the duration of a session — it's what has
     // been powering the live cost tracking on /dashboard all night (agent/hooks/cost-tracking.ts)
     // — unlike session.completed/session.failed, which a hard timeout kill does not reliably
-    // reach. Checking elapsed time here, on every step, is what actually catches an
-    // about-to-time-out run while the session is still alive to be gracefully stopped, instead
-    // of only ever finding out about it after an external, unpredictable kill already happened.
+    // reach. Checking spend here, on every step, is what actually catches a non-converging run
+    // while the session is still alive to be gracefully stopped, instead of only ever finding
+    // out about it after an external, unpredictable kill already happened.
     async "step.completed"(_event, ctx) {
       const run = await store.getRun(ctx.session.id).catch(() => null);
       if (!run || TERMINAL_STATUSES.has(run.status)) return;
 
       const spend = totalCost(run);
-      if (spend >= COST_CAP_USD) {
-        console.log(
-          `[run-tracking] 💸 session ${ctx.session.id} spent $${spend.toFixed(2)} ` +
-            `(>= $${COST_CAP_USD.toFixed(2)} cap) — marking failed and requesting cancel`,
-        );
-        await markIncompleteIfNeverFinished(ctx.session.id, "cost_capped");
-        await requestGracefulCancel(ctx.session.id);
-        return;
-      }
-
-      const elapsedMs = Date.now() - new Date(run.startedAt).getTime();
-      if (elapsedMs < GRACEFUL_KILL_AT_MS) return;
+      if (spend < COST_CAP_USD) return;
       console.log(
-        `[run-tracking] ⏱ session ${ctx.session.id} at ${Math.round(elapsedMs / 1000)}s ` +
-          `(>= ${Math.round(GRACEFUL_KILL_AT_MS / 1000)}s threshold) — marking failed and requesting cancel`,
+        `[run-tracking] 💸 session ${ctx.session.id} spent $${spend.toFixed(2)} ` +
+          `(>= $${COST_CAP_USD.toFixed(2)} cap) — marking failed and requesting cancel`,
       );
-      await markIncompleteIfNeverFinished(ctx.session.id, "timed_out");
+      await markIncompleteIfNeverFinished(ctx.session.id, "cost_capped");
       await requestGracefulCancel(ctx.session.id);
     },
     async "session.started"(_event, ctx) {
