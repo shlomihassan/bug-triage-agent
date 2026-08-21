@@ -30,7 +30,9 @@ don't rediscover file locations or patterns already documented there.
 2. Reproduce the bug: write a targeted failing test that demonstrates exactly the reported
    behavior.
    - Backend: a Go test in the relevant `pkg/models/*_test.go` file, run with
-     `mage test:filter <TestName>` from `/workspace`.
+     `go test ./pkg/<package> -run <TestName> -short` from `/workspace` — targeted at the
+     one package, which takes seconds. (`mage test:filter` compiles the entire tree on every
+     invocation, minutes each time; save it for when you genuinely need a cross-package run.)
    - Frontend: a Vitest test alongside the relevant file, run with
      `cd /workspace/frontend && pnpm test:unit <path>`.
    Confirm it actually fails on the current code. If you cannot get a failing test to
@@ -60,7 +62,9 @@ don't rediscover file locations or patterns already documented there.
 ## 2. Solve (only if phase 1 produced a reproducing failing test)
 
 1. Create a branch: `git -C /workspace checkout -b fix/issue-<number>`.
-2. Edit code until the repro test passes. Then run the full check suite:
+2. Edit code until the repro test passes, re-running only the targeted
+   `go test ./pkg/<package> -run <TestName> -short` between edits — never the whole tree per
+   iteration. Once it passes, run the full check suite exactly once:
    - Backend changes: `mage lint` and `mage test:web` (or `mage test:feature`, whichever
      covers the touched package) from `/workspace`.
    - Frontend changes: `pnpm lint` and `pnpm typecheck` and `pnpm test:unit` from

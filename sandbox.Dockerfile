@@ -34,4 +34,17 @@ ENV GOTOOLCHAIN=local
 # instructions.md invokes directly as `mage test:filter <TestName>`.
 RUN go install github.com/magefile/mage@v1.17.2
 
+# Vikunja's test suite hard-requires CGO: go-sqlite3 is a cgo package, and without a C
+# compiler Go silently builds its stub, so EVERY `go test` / `mage test:*` invocation fails
+# with "go-sqlite3 requires cgo to work. This is a stub" — the repro test can neither fail
+# meaningfully nor ever pass, so the agent iterates in the fix loop until its budget dies
+# without ever reaching open_pr (observed as runs stuck in "fixing"; matches the 3/3
+# wasted-run pattern). gcc + libc headers make cgo real; CGO_ENABLED=1 pins it on
+# explicitly so a stray env default can never silently reintroduce the stub.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends gcc libc6-dev; \
+    rm -rf /var/lib/apt/lists/*
+ENV CGO_ENABLED=1
+
 RUN go version && mage --version

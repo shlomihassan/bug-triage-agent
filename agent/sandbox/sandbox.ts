@@ -26,6 +26,20 @@ import { defaultBackend } from "eve/sandbox";
 const OWNER = process.env.GITHUB_OWNER ?? "shlomihassan";
 const REPO = process.env.GITHUB_REPO ?? "vikunja";
 
+// Matches sandbox.Dockerfile's GO_VERSION — Vikunja's go.mod pins `go 1.26.4`.
+const GO_VERSION = "1.26.4";
+
+// Every process the agent starts in the Vercel sandbox needs these on PATH/in env, since there
+// is no Dockerfile ENV layer to fall back on there (see the `bootstrap` comment below). Standard
+// system dirs are included because this *replaces* the default PATH rather than extending it —
+// `env` on the Vercel backend sets exact values, it doesn't append.
+const VERCEL_SANDBOX_ENV = {
+  PATH: "/usr/local/go/bin:/root/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+  GOPATH: "/root/go",
+  GOTOOLCHAIN: "local",
+  CGO_ENABLED: "1",
+};
+
 export default defineSandbox({
   // defaultBackend keeps eve's availability chain intact — Vercel Sandbox when deployed, Docker
   // locally — while pointing the Docker arm at an image that actually has the Go toolchain.
@@ -33,10 +47,50 @@ export default defineSandbox({
   // run hit `which go` → exit 127 and could never satisfy phase 2's "reproduce with a failing Go
   // test" gate. Build it with:
   //   docker build -f sandbox.Dockerfile -t bug-triage-sandbox:latest .
-  // The vercel arm is left at its default; on Vercel the published image applies as before.
+  // The Vercel arm gets the same packages installed at bootstrap time instead (see below) since
+  // it cannot boot from a custom image at all — eve's Vercel backend always boots its own
+  // published runtime image (`runtime` is deliberately excluded from VercelSandboxCreateOptions).
   backend: defaultBackend({
     docker: { image: process.env.SANDBOX_IMAGE ?? "bug-triage-sandbox:latest" },
+    vercel: { env: VERCEL_SANDBOX_ENV },
   }),
+  // Template-scoped: runs once when eve builds the Vercel sandbox template, and the resulting
+  // snapshot seeds every later session — so this cost (an ~80MB Go download, an apt-get) is paid
+  // once, not per session. Gated to Vercel only: the Docker arm already has Go/mage/gcc baked
+  // into bug-triage-sandbox:latest via sandbox.Dockerfile, so re-running this there would just
+  // slow down every local template build for no benefit.
+  //
+  // This closes a gap that predates this comment: an earlier fix (see the Docker image note
+  // above) added Go only to the custom Docker image and left "the Vercel arm at its default" —
+  // which silently meant *production* (Vercel-hosted runs, e.g. real GitHub-triggered issues)
+  // never got a Go toolchain at all. A live run against a backend bug (auth/permission fix,
+  // requires a Go repro test) sat in "fixing" for 15+ minutes with sparse, unproductive model
+  // calls and no forward progress — consistent with the agent fighting a sandbox that has no
+  // `go` binary rather than a hung process. Installing gcc/libc6-dev alongside Go (not just Go
+  // alone) matters too: Vikunja's go-sqlite3 dependency is a cgo package, and without a C
+  // compiler Go silently builds a stub instead of erroring, so even a repro test that gets past
+  // `which go` can never meaningfully fail or pass. CGO_ENABLED=1 in VERCEL_SANDBOX_ENV pins
+  // that on explicitly.
+  async bootstrap({ use }) {
+    if (!process.env.VERCEL) return;
+    const sandbox = await use();
+    const install = await sandbox.run({
+      command: [
+        "apt-get update",
+        "apt-get install -y --no-install-recommends gcc libc6-dev curl",
+        "rm -rf /var/lib/apt/lists/*",
+        `arch=$(dpkg --print-architecture)`,
+        `curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-\${arch}.tar.gz" -o /tmp/go.tgz`,
+        "rm -rf /usr/local/go",
+        "tar -C /usr/local -xzf /tmp/go.tgz",
+        "rm /tmp/go.tgz",
+        "/usr/local/go/bin/go install github.com/magefile/mage@v1.17.2",
+        "/usr/local/go/bin/go version",
+        "/root/go/bin/mage --version",
+      ].join(" && "),
+    });
+    console.log(`[sandbox] bootstrap (Vercel Go/mage/gcc install):\n${install.stdout ?? ""}`);
+  },
   async onSession({ use }) {
     const sandbox = await use();
     await sandbox.run({ command: "git config --global --add safe.directory /workspace" });
