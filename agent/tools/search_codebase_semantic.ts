@@ -29,8 +29,11 @@ async function searchChunks(queryEmbedding: number[], topK: number): Promise<Chu
   const vecResult = await db.exec(`SELECT id, embedding FROM ${table("chunks_vec")}`);
   if (!vecResult.length) return [];
 
+  // Chunk ids are text keys like "pkg/models/api_tokens.go:72-77", never integers. An earlier
+  // version coerced both sides of this join with Number(), which turned every id into NaN and
+  // collapsed the whole chunk map onto a single NaN key — the join could not match even once.
   const similarities = vecResult[0].values.map((row) => {
-    const id = row[0] as number;
+    const id = String(row[0]);
     const embeddingJson = row[1] as string;
     const embedding = JSON.parse(embeddingJson);
     return { id, score: cosineSimilarity(queryEmbedding, embedding) };
@@ -41,14 +44,14 @@ async function searchChunks(queryEmbedding: number[], topK: number): Promise<Chu
 
   // Load all chunks to join with top results
   const chunkResult = await db.exec(`SELECT id, file_path, start_line, end_line FROM ${table("chunks")}`);
-  const chunkMap = new Map<number, { filePath: string; startLine: number; endLine: number }>();
+  const chunkMap = new Map<string, { filePath: string; startLine: number; endLine: number }>();
   if (chunkResult.length) {
     chunkResult[0].values.forEach((row) => {
-      const id = row[0] as unknown as number;
+      const id = String(row[0]);
       const filePath = row[1] as string;
       const startLine = row[2] as number;
       const endLine = row[3] as number;
-      chunkMap.set(Number(id), { filePath, startLine, endLine });
+      chunkMap.set(id, { filePath, startLine, endLine });
     });
   }
 

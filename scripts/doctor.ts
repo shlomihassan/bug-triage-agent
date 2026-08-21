@@ -241,11 +241,55 @@ function checkPlan(): void {
   }
 }
 
+/**
+ * Voyage embeds the *query* at search time, so a stored index is only half the requirement — an
+ * invalid key means search_codebase_semantic fails on every call and the agent silently falls
+ * back to grep. That fallback is why the tool looks like it "works" while contributing nothing.
+ */
+async function checkVoyage(): Promise<void> {
+  const key = process.env.VOYAGE_API_KEY;
+  if (!key) {
+    checks.push({
+      name: "Voyage API key",
+      ok: false,
+      detail: "VOYAGE_API_KEY not set — semantic queries cannot be embedded.",
+      fix: "Add VOYAGE_API_KEY (dashboard.voyageai.com) to Vercel and .env.local",
+    });
+    return;
+  }
+  try {
+    const res = await fetch("https://api.voyageai.com/v1/embeddings", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+      body: JSON.stringify({ input: ["ping"], model: "voyage-code-3", input_type: "query" }),
+    });
+    if (res.ok) {
+      checks.push({ name: "Voyage API key", ok: true, detail: "Key valid; queries can embed." });
+      return;
+    }
+    checks.push({
+      name: "Voyage API key",
+      ok: false,
+      detail:
+        `Voyage rejected the key (HTTP ${res.status}). search_codebase_semantic will fail on ` +
+        "every call and silently fall back to grep.",
+      fix: "Issue a new key at dashboard.voyageai.com and update Vercel + .env.local",
+    });
+  } catch (err) {
+    checks.push({
+      name: "Voyage API key",
+      ok: false,
+      detail: `Could not reach Voyage: ${(err as Error).message}`,
+    });
+  }
+}
+
 async function main(): Promise<void> {
   loadEnvLocal();
   checkPlan();
   checkGitHubAuth();
   await checkModelAccess();
+  await checkVoyage();
   await checkRedis();
   await checkNeon();
 
