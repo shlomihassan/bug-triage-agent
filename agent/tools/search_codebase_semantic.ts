@@ -10,61 +10,30 @@ export interface ChunkMatch {
   score: number;
 }
 
-function cosineSimilarity(a: number[], b: number[]): number {
-  let dotProduct = 0;
-  let normA = 0;
-  let normB = 0;
-  for (let i = 0; i < a.length; i++) {
-    dotProduct += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
-  }
-  return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
-}
-
 async function searchChunks(queryEmbedding: number[], topK: number): Promise<ChunkMatch[]> {
   const db = createNeonDb();
-
-  // Load all embeddings and compute similarity scores
-  const vecResult = await db.exec(`SELECT id, embedding FROM ${table("chunks_vec")}`);
-  if (!vecResult.length) return [];
-
-  // Chunk ids are text keys like "pkg/models/api_tokens.go:72-77", never integers. An earlier
-  // version coerced both sides of this join with Number(), which turned every id into NaN and
-  // collapsed the whole chunk map onto a single NaN key — the join could not match even once.
-  const similarities = vecResult[0].values.map((row) => {
-    const id = String(row[0]);
-    const embeddingJson = row[1] as string;
-    const embedding = JSON.parse(embeddingJson);
-    return { id, score: cosineSimilarity(queryEmbedding, embedding) };
-  });
-
-  // Sort by similarity and get top K
-  const topResults = similarities.sort((a, b) => b.score - a.score).slice(0, topK);
-
-  // Load all chunks to join with top results
-  const chunkResult = await db.exec(`SELECT id, file_path, start_line, end_line FROM ${table("chunks")}`);
-  const chunkMap = new Map<string, { filePath: string; startLine: number; endLine: number }>();
-  if (chunkResult.length) {
-    chunkResult[0].values.forEach((row) => {
-      const id = String(row[0]);
-      const filePath = row[1] as string;
-      const startLine = row[2] as number;
-      const endLine = row[3] as number;
-      chunkMap.set(id, { filePath, startLine, endLine });
-    });
-  }
-
-  // Match top similarity results with chunk metadata
-  const chunks: ChunkMatch[] = [];
-  for (const { id, score } of topResults) {
-    const chunk = chunkMap.get(id);
-    if (chunk) {
-      chunks.push({ ...chunk, score });
-    }
-  }
-
-  return chunks;
+  // chunks_vec.embedding is a native pgvector `vector(1024)` column (see
+  // scripts/migrate-embeddings-to-vector.ts) backed by an IVFFlat index. `<=>` is pgvector's
+  // cosine-distance operator; ORDER BY it ASC with LIMIT pushes the whole nearest-neighbor
+  // search into Postgres instead of pulling every embedding over the wire and ranking in JS —
+  // the previous version fetched all 5,306 rows (measured: 115MB, ~9.3s) on every call, with
+  // no logging anywhere in the path, so a slow or degraded run of that query looked identical
+  // to a silent hang.
+  const vectorLiteral = `[${queryEmbedding.join(",")}]`;
+  const result = await db.query(
+    `SELECT c.file_path, c.start_line, c.end_line, 1 - (v.embedding <=> $1::vector) AS score
+     FROM ${table("chunks_vec")} v
+     JOIN ${table("chunks")} c ON c.id = v.id
+     ORDER BY v.embedding <=> $1::vector
+     LIMIT $2`,
+    [vectorLiteral, topK],
+  );
+  return result.rows.map((row: Record<string, unknown>) => ({
+    filePath: row.file_path as string,
+    startLine: row.start_line as number,
+    endLine: row.end_line as number,
+    score: Number(row.score),
+  }));
 }
 
 export default defineTool({
@@ -84,12 +53,17 @@ export default defineTool({
       return { matches: [], note: "Code intelligence database not configured; fall back to grep/read" };
     }
 
+    console.log(`[search_codebase_semantic] query="${query}" topK=${topK}`);
+    const startedAt = Date.now();
     try {
       const [queryEmbedding] = await embedTexts([query], apiKey);
       const results = await searchChunks(queryEmbedding, topK);
+      console.log(
+        `[search_codebase_semantic] ✅ ${results.length} matches in ${Date.now() - startedAt}ms`,
+      );
       return { matches: results };
     } catch (err) {
-      console.error("Search failed:", err);
+      console.error(`[search_codebase_semantic] ✖ failed after ${Date.now() - startedAt}ms:`, err);
       return { matches: [], note: "Search failed; fall back to grep/read" };
     }
   },
