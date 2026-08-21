@@ -102,5 +102,35 @@ export default defineChannel({
         303,
       );
     }),
+    // Temporary operator tooling: retires a GitHub-channel session so its next webhook
+    // starts fresh with a new sandbox, rather than trying to resume one whose sandbox
+    // snapshot no longer exists. Needed once, after clearing Vercel Sandbox snapshot
+    // storage manually invalidated the session backing issue #1 ("Cannot resume sandbox:
+    // no snapshot available", 410). Safe to delete once no session needs a manual reset.
+    POST("/dashboard/admin/reset-github-session", async (req, { reset }) => {
+      if (req.headers.get("x-admin-secret") !== process.env.ADMIN_RESET_SECRET) {
+        return new Response("Forbidden", { status: 403 });
+      }
+      const url = new URL(req.url);
+      const repositoryId = url.searchParams.get("repositoryId");
+      const issueNumber = url.searchParams.get("issueNumber");
+      if (!repositoryId || !issueNumber) {
+        return new Response("repositoryId and issueNumber query params required", {
+          status: 400,
+        });
+      }
+      // Continuation-token format for a GitHub "issue" conversation, read directly out of
+      // eve's compiled githubContinuationToken() (public/channels/github/inbound.js). Not
+      // part of eve's public export surface, so reproduced rather than imported — reverify
+      // against the installed eve version before reusing this route after an eve upgrade.
+      const continuationToken = `repo:${repositoryId}:issue:${issueNumber}`;
+      const result = await reset({
+        continuationToken,
+        reason: "manual reset after sandbox snapshot storage cleanup",
+      });
+      return new Response(JSON.stringify(result), {
+        headers: { "content-type": "application/json" },
+      });
+    }),
   ],
 });
