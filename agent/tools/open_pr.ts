@@ -4,6 +4,7 @@ import { Octokit } from "@octokit/rest";
 import { requiresApproval } from "../lib/autonomy";
 import { loadConfig } from "../lib/config";
 import { createRedisStore } from "../lib/store";
+import { postToRunThread } from "../lib/slack-notify";
 
 export const openPrInputSchema = z.object({
   issueNumber: z.number().int().positive(),
@@ -64,6 +65,37 @@ export default defineTool({
           },
         })
         .catch((err) => console.error(`[open_pr] ✖ updateRun (pendingPr) failed:`, err));
+      await postToRunThread(store, ctx.session.id, {
+        text: `🚧 *${input.title}* needs approval before the PR opens.`,
+        blocks: [
+          {
+            type: "section",
+            text: { type: "mrkdwn", text: `🚧 *${input.title}* needs approval before the PR opens.\nBranch \`${input.branch}\`` },
+          },
+          {
+            type: "actions",
+            elements: [
+              {
+                type: "button",
+                // Slack rejects a message where two elements share one action_id — confirmed
+                // live against the real API ("action_id \"resolve_pr\" already exists").
+                // agent/channels/slack.ts's parseApprovalAction accepts both of these.
+                action_id: "resolve_pr_approve",
+                text: { type: "plain_text", text: "Approve" },
+                style: "primary",
+                value: `${ctx.session.id}:approve`,
+              },
+              {
+                type: "button",
+                action_id: "resolve_pr_deny",
+                text: { type: "plain_text", text: "Deny" },
+                style: "danger",
+                value: `${ctx.session.id}:deny`,
+              },
+            ],
+          },
+        ],
+      }).catch((err) => console.error(`[open_pr] ✖ Slack post (approval) failed:`, err));
       return {
         status: "awaiting_approval" as const,
         message:
@@ -95,6 +127,9 @@ export default defineTool({
       // The PR is already open at this point; losing the update silently leaves the dashboard
       // claiming the run is still in flight forever.
       .catch((err) => console.error(`[open_pr] ✖ updateRun failed:`, err));
+    await postToRunThread(store, ctx.session.id, {
+      text: `✅ PR opened: ${pr.data.html_url}`,
+    }).catch((err) => console.error(`[open_pr] ✖ Slack post (outcome) failed:`, err));
     return { prUrl: pr.data.html_url, prNumber: pr.data.number };
   },
 });

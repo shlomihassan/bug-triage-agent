@@ -4,6 +4,7 @@ import { generateObject } from "ai";
 import { haikuModel, HAIKU_MODEL_ID } from "../lib/anthropic";
 import { calculateCostUsd } from "../lib/pricing";
 import { createRedisStore } from "../lib/store";
+import { postToRunThread, updateRunThreadMessage } from "../lib/slack-notify";
 
 const severitySchema = z.object({
   severity: z.enum(["critical", "high", "medium", "low"]),
@@ -80,6 +81,24 @@ export default defineTool({
       .catch((err) => {
         console.error(`[classify_severity] ✖ updateRun failed:`, err);
       });
+    // Per the design's step 2: edit the session.started placeholder ("🔍 Investigating a new
+    // issue…") in place with the real issue number/title now that they're known, then post the
+    // triage summary as a threaded reply — mirroring what already goes into the GitHub issue
+    // comment. Only attempted if the placeholder was actually posted (slackPlaceholderTs set);
+    // otherwise there's nothing to edit and this is skipped, matching the "skip rather than start
+    // a disconnected thread" rule in the design's error-handling section.
+    const runForSlack = await store.getRun(ctx.session.id).catch(() => null);
+    if (runForSlack?.slackPlaceholderTs) {
+      await updateRunThreadMessage(store, ctx.session.id, runForSlack.slackPlaceholderTs, {
+        text: `*#${issueNumber}: ${issueTitle}*`,
+      }).catch((err) => console.error(`[classify_severity] ✖ Slack placeholder update failed:`, err));
+    }
+    await postToRunThread(store, ctx.session.id, {
+      text:
+        `*#${issueNumber}: ${issueTitle}*\n` +
+        `Severity: *${object.severity}* — ${object.rationale}\n` +
+        `Root cause: ${rootCause}`,
+    }).catch((err) => console.error(`[classify_severity] ✖ Slack post failed:`, err));
     return object;
   },
 });
