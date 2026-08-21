@@ -1,6 +1,8 @@
 import { connectGitHubCredentials } from "@vercel/connect/eve";
 import { defaultGitHubAuth, githubChannel } from "eve/channels/github";
+import { createRedisStore } from "../lib/store";
 
+const store = createRedisStore();
 const BOT_NAME = "bug-triage-agent";
 // eve's own defaultOnComment (equivalent mention-gate logic) isn't part of the public
 // `eve/channels/github` export surface — only its type-level building blocks are — so this
@@ -56,9 +58,34 @@ export default githubChannel({
     if (!auth) return null;
     return { auth };
   },
-  // NOTE: deliberately no `events` overrides here. Per eve's GitHubChannelEvents docs, a handler
-  // supplied for a key *replaces* the built-in rather than running alongside it — and the
-  // built-ins are load-bearing: `turn.started` does the eyes reaction plus the repo checkout into
-  // /workspace, and `turn.failed`/`session.failed` post the error comment on the issue. Adding
-  // log-only handlers here would silently disable the checkout and swallow failure reporting.
+  // Per eve's GitHubChannelEvents docs, a handler supplied for a key *replaces* the built-in
+  // rather than running alongside it — turn.started/message.completed/session.failed/turn.failed
+  // are load-bearing built-ins (checkout, comment posting, error reporting) and must stay
+  // undefined here so eve's defaults keep running. input.requested has no built-in handler, so
+  // defining it is additive, not a replacement.
+  events: {
+    // Captures a paused tool-approval's requestId/options so the dashboard can resolve it
+    // directly via send({inputResponses}) — GitHub comment replies don't work for this: eve
+    // wraps every delivered message in a <github_context> block, which breaks its own
+    // plain-text option-matching for approve/deny (confirmed live, 2026-08-21). Only
+    // "tool-approval" is stored; a plain "question" input request isn't something the dashboard
+    // has a use for yet.
+    async "input.requested"(data, channel, ctx) {
+      const approval = data.requests.find((r) => r.kind === "tool-approval");
+      if (!approval) return;
+      await store
+        .updateRun(ctx.session.id, {
+          pendingApproval: {
+            requestId: approval.requestId,
+            repositoryId: channel.repository.id,
+            issueNumber: channel.conversation.issueNumber ?? 0,
+            prompt: approval.prompt,
+            options: approval.options ?? [],
+          },
+        })
+        .catch((err) => {
+          console.error(`[github] ✖ storing pendingApproval failed:`, err);
+        });
+    },
+  },
 });

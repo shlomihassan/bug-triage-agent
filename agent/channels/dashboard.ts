@@ -101,23 +101,51 @@ export default defineChannel({
         : `<form method="post" action="/dashboard/${run.runId}/stop" onsubmit="return confirm('Stop this run now? This cancels the in-flight turn immediately.')">
             <button type="submit" style="background:#c0392b;color:#fff;border:none;padding:0.5rem 1rem;border-radius:4px;cursor:pointer;">Stop this run</button>
           </form>`;
-      // No button here calls a route directly: send()/getSession() are scoped to the calling
-      // channel, so a route on this (dashboard) channel can never resume a session parked on
-      // the github channel — confirmed live (2026-08-21) when that exact approach threw
-      // RuntimeNoActiveSessionError for continuationToken "dashboard:" instead of the real
-      // github-channel token. The only channel that can legitimately resume this session is the
-      // one that owns it, via a real GitHub comment (agent/channels/github.ts's onComment,
-      // wired to eve's defaultOnComment) — this panel links there instead of faking a button
-      // that can't actually work.
+      // Earlier attempts to resume this session from a dashboard route failed two different
+      // ways: (1) send() with getSession(runId).continuationToken threw RuntimeNoActiveSession
+      // Error because getSession synthesizes a channel-local "dashboard:..." token, not the
+      // real github one; (2) a plain-text GitHub comment reply ("@bug-triage-agent approve")
+      // doesn't auto-resolve the pending question either, because eve wraps every delivered
+      // message in a <github_context> block that breaks its own option-text matching. This
+      // button avoids both: it sends structured inputResponses (not plain text, so the
+      // context-wrapping issue doesn't apply) against the real continuationToken reconstructed
+      // from run.pendingApproval (captured by github.ts's input.requested handler at the moment
+      // the question was actually asked — not guessed from run.issueNumber alone).
+      const approval = run.pendingApproval;
       const approvalPanel =
-        run.status === "awaiting_approval" && run.issueNumber > 0
+        run.status === "awaiting_approval" && approval
           ? `<div style="margin:1rem 0;padding:1rem;border:1px solid #e0a800;background:#fff8e1;border-radius:4px;">
-              <p><strong>Awaiting human approval</strong> — open_pr paused this run (see agent/lib/autonomy.ts's requiresApproval). Review the diff in the latest issue comment, then reply on the issue:</p>
-              <p><a href="https://github.com/${escapeHtml(process.env.GITHUB_OWNER ?? "")}/${escapeHtml(
-              process.env.GITHUB_REPO ?? "",
-            )}/issues/${run.issueNumber}"><code>@bug-triage-agent approve</code></a> or <code>@bug-triage-agent deny</code></p>
+              <p><strong>Awaiting human approval</strong>: ${escapeHtml(approval.prompt)}</p>
+              <p>Review the diff in the latest issue comment before deciding.</p>
+              ${approval.options
+                .map(
+                  (opt) =>
+                    `<button type="button" onclick="resolveApproval('${run.runId}','${opt.id}')" style="background:${
+                      opt.id === "deny" ? "#c0392b" : "#2e7d32"
+                    };color:#fff;border:none;padding:0.5rem 1rem;border-radius:4px;cursor:pointer;margin-right:0.5rem;">${escapeHtml(
+                      opt.label,
+                    )}</button>`,
+                )
+                .join("")}
+              <script>
+                async function resolveApproval(runId, optionId) {
+                  if (!confirm('Really submit "' + optionId + '"?')) return;
+                  const secret = prompt('Admin secret:');
+                  if (!secret) return;
+                  const res = await fetch('/dashboard/admin/resolve-approval/' + runId + '?optionId=' + encodeURIComponent(optionId), {
+                    method: 'POST',
+                    headers: { 'x-admin-secret': secret },
+                  });
+                  if (!res.ok) { alert('Failed: ' + res.status + ' ' + (await res.text())); return; }
+                  location.reload();
+                }
+              </script>
             </div>`
-          : "";
+          : run.status === "awaiting_approval"
+            ? `<div style="margin:1rem 0;padding:1rem;border:1px solid #e0a800;background:#fff8e1;border-radius:4px;">
+                <p><strong>Awaiting human approval</strong>, but no pendingApproval was captured for this run (started before the input.requested handler was added). Reply on the issue instead: <code>@bug-triage-agent approve</code> — though note that path is separately confirmed broken tonight.</p>
+              </div>`
+            : "";
       const body = `
         <p><a href="/dashboard">&larr; All runs</a></p>
         <h1>#${run.issueNumber}: ${escapeHtml(run.issueTitle)}</h1>
@@ -191,6 +219,36 @@ export default defineChannel({
         reason: "manual reset after sandbox snapshot storage cleanup",
       });
       return new Response(JSON.stringify(result), {
+        headers: { "content-type": "application/json" },
+      });
+    }),
+    // Resolves a paused open_pr approval via structured inputResponses instead of a GitHub
+    // comment reply (see the approvalPanel comment on GET /dashboard/:runId for why the
+    // comment path doesn't work). continuationToken is reconstructed from run.pendingApproval
+    // (captured at question-time by github.ts's input.requested handler, not guessed from
+    // run.issueNumber) — eve's public githubContinuationToken format is `repo:<repositoryId>
+    // :issue:<issueNumber>`. intent: "resume" errors loudly if no active session exists rather
+    // than silently starting a new one, unlike the plain receive()/send() defaults tried
+    // earlier tonight, both of which accidentally created duplicate sessions.
+    POST("/dashboard/admin/resolve-approval/:runId", async (req, { params, send }) => {
+      if (req.headers.get("x-admin-secret") !== process.env.ADMIN_RESET_SECRET) {
+        return new Response("Forbidden", { status: 403 });
+      }
+      const url = new URL(req.url);
+      const optionId = url.searchParams.get("optionId");
+      if (!optionId) {
+        return new Response("optionId query param required", { status: 400 });
+      }
+      const run = await store.getRun(params.runId);
+      if (!run?.pendingApproval) {
+        return new Response("No pendingApproval recorded for this run", { status: 400 });
+      }
+      const continuationToken = `repo:${run.pendingApproval.repositoryId}:issue:${run.pendingApproval.issueNumber}`;
+      const session = await send(
+        { inputResponses: [{ requestId: run.pendingApproval.requestId, optionId }] },
+        { auth: null, continuationToken, intent: "resume" },
+      );
+      return new Response(JSON.stringify({ sessionId: session.id }), {
         headers: { "content-type": "application/json" },
       });
     }),
