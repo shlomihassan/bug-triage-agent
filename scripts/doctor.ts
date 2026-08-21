@@ -148,9 +148,63 @@ async function checkNeon(): Promise<void> {
   }
 }
 
+/**
+ * The check that actually mattered. Every model call the agent makes goes through
+ * one of these two paths, and when both are shut the turn dies at its first step
+ * with no reaction, no comment and no run row — indistinguishable from "the
+ * webhook never arrived". On 2026-08-19 a single $5.91 run exhausted the Vercel
+ * AI credit balance, dropping the account to the free tier, which is blocked from
+ * Claude models. The agent was dead for a day before anyone could name why.
+ */
+async function checkModelAccess(): Promise<void> {
+  const { generateText } = await import("ai");
+  const { anthropic } = await import("@ai-sdk/anthropic");
+
+  const errors: string[] = [];
+
+  if (process.env.ANTHROPIC_API_KEY) {
+    try {
+      await generateText({
+        model: anthropic("claude-haiku-4-5-20251001"),
+        prompt: "Reply with exactly: ok",
+      });
+      checks.push({
+        name: "Model access",
+        ok: true,
+        detail: "Direct Anthropic API key works.",
+      });
+      return;
+    } catch (err) {
+      errors.push(`direct: ${(err as Error).message.slice(0, 120)}`);
+    }
+  } else {
+    errors.push("direct: ANTHROPIC_API_KEY not set");
+  }
+
+  try {
+    await generateText({ model: "anthropic/claude-haiku-4.5", prompt: "Reply with exactly: ok" });
+    checks.push({ name: "Model access", ok: true, detail: "Vercel AI Gateway works." });
+    return;
+  } catch (err) {
+    errors.push(`gateway: ${(err as Error).message.slice(0, 120)}`);
+  }
+
+  checks.push({
+    name: "Model access",
+    ok: false,
+    detail:
+      "No usable model path — the agent cannot run at all. Turns die at the first " +
+      `model call, silently. (${errors.join(" | ")})`,
+    fix:
+      "Either set ANTHROPIC_API_KEY in Vercel (vercel env add ANTHROPIC_API_KEY production), " +
+      "or top up Vercel AI credits at vercel.com/[team]/~/ai",
+  });
+}
+
 async function main(): Promise<void> {
   loadEnvLocal();
   checkGitHubAuth();
+  await checkModelAccess();
   await checkRedis();
   await checkNeon();
 
