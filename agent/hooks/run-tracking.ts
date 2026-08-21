@@ -1,5 +1,6 @@
 import { defineHook } from "eve/hooks";
 import { createRedisStore, totalCost } from "../lib/store";
+import { postToRunThread } from "../lib/slack-notify";
 
 const store = createRedisStore();
 const TERMINAL_STATUSES = new Set(["pr_opened", "failed", "escalated"]);
@@ -41,6 +42,9 @@ async function markIncompleteIfNeverFinished(
     .catch((err) => {
       console.error(`[run-tracking] ✖ marking incomplete run failed failed:`, err);
     });
+  await postToRunThread(store, sessionId, {
+    text: `⏹️ Run stopped: ${outcome}.`,
+  }).catch((err) => console.error(`[run-tracking] ✖ Slack post (outcome) failed:`, err));
 }
 
 // Best-effort proactive cancel. Reuses the same session.cancel() path the dashboard's own Stop
@@ -96,6 +100,9 @@ export default defineHook({
         .catch((err) => {
           console.error(`[run-tracking] ✖ eager createRun failed:`, err);
         });
+      await postToRunThread(store, ctx.session.id, {
+        text: "🔍 Investigating a new issue…",
+      }).catch((err) => console.error(`[run-tracking] ✖ Slack post (start) failed:`, err));
     },
     // Fires on every session end, including a clean timeout — which is exactly the case that
     // needs catching, since "Completed" here does not imply anything useful happened.

@@ -4,6 +4,7 @@ import { generateObject } from "ai";
 import { haikuModel, HAIKU_MODEL_ID } from "../lib/anthropic";
 import { calculateCostUsd } from "../lib/pricing";
 import { createRedisStore } from "../lib/store";
+import { postToRunThread } from "../lib/slack-notify";
 
 const severitySchema = z.object({
   severity: z.enum(["critical", "high", "medium", "low"]),
@@ -80,6 +81,12 @@ export default defineTool({
       .catch((err) => {
         console.error(`[classify_severity] ✖ updateRun failed:`, err);
       });
+    await postToRunThread(store, ctx.session.id, {
+      text:
+        `*#${issueNumber}: ${issueTitle}*\n` +
+        `Severity: *${object.severity}* — ${object.rationale}\n` +
+        `Root cause: ${rootCause}`,
+    }).catch((err) => console.error(`[classify_severity] ✖ Slack post failed:`, err));
     return object;
   },
 });
