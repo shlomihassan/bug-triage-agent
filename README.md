@@ -14,6 +14,7 @@ Task.pdf`) evaluates against.
 7. [Answering the evaluation directly](#7-answering-the-evaluation-directly)
 8. [What I'd build with more time](#8-what-id-build-with-more-time)
 9. [Human-readable vs. internal](#9-whats-human-readable-and-what-deliberately-isnt)
+10. [Component choices, and the roads not taken](#10-component-choices-and-the-roads-not-taken)
 
 ---
 
@@ -152,9 +153,10 @@ split is the single most load-bearing decision in this system; §6 explains why.
 
 ### 2.1 Code intelligence — the index layer (graph + semantic + embedding service)
 
-Built as its own offline pipeline (`indexing/`), separate from the deployed agent, and
-committed as one artifact the agent reads at runtime with zero external calls on the graph
-side and one small API call on the semantic side:
+Built as its own offline pipeline (`indexing/`), separate from the deployed agent. The
+extraction/embedding side runs once per codebase snapshot with zero external calls on the
+graph side and one small API call per chunk on the semantic side; the runtime side queries
+a shared database with zero indexing work happening inline:
 
 ```mermaid
 graph LR
@@ -169,15 +171,15 @@ graph LR
         VikunjaSrc --> Embedder
     end
 
-    subgraph db["code-intelligence.sqlite — one file, committed to git"]
+    subgraph db["Neon Postgres — code_intelligence schema (agent/lib/neon-db.ts)"]
         Symbols[("symbols<br/>id, name, kind, file, lines, language")]
         Edges[("edges<br/>caller → callee")]
-        Chunks[("chunks + chunks_vec<br/>source text + embedding, sqlite-vec")]
+        Chunks[("chunks + chunks_vec<br/>source text + pgvector(1024) embedding,<br/>IVFFlat index, cosine distance (&lt;=&gt;)")]
     end
 
     subgraph runtime["Runtime — inside the agent, read-only"]
-        QCG["query_code_graph<br/>pure local SQL, zero network calls"]
-        SCS["search_codebase_semantic<br/>1 embedding call/search, then local vector search"]
+        QCG["query_code_graph<br/>SQL joins against symbols/edges"]
+        SCS["search_codebase_semantic<br/>1 embedding call/search, then<br/>nearest-neighbor search in Postgres"]
     end
 
     GoExtractor -->|"symbols + calls edges"| Symbols
@@ -196,9 +198,12 @@ answers *"where in this huge codebase is the code for X"* — the first call eve
 makes, replacing grep-archaeology. The call graph answers a question embeddings structurally
 can't: *"who calls this function"* — which is what blast-radius actually depends on
 (`CanDelete` is implemented on ~23 different types in Vikunja; a similarity search can't tell
-you which callers matter, but a real graph edge can). Both read from the same SQLite file,
-built once offline and shipped as a bundled read-only asset, so a live triage run never waits
-on an indexing job — it only ever queries.
+you which callers matter, but a real graph edge can). Both tools read from the same database,
+built once offline, so a live triage run never waits on an indexing job — it only ever queries.
+
+**This wasn't the first storage choice, and the change is worth being upfront about**: §10
+covers why it started as a single committed SQLite file and what broke in production that
+moved it to Postgres.
 
 ### 2.2 Slack integration
 
@@ -608,7 +613,7 @@ safe and asks clearly for the rest is closer to something a team could actually 
 - Redis `BugRun` records and the Lua scripts that update them atomically — machine state,
   correctness-critical, meaningless to read directly (and not meant to be — the dashboard is
   the read layer over this).
-- The SQLite code-intelligence index (symbols/edges/chunk embeddings) — a lookup structure,
+- The Postgres code-intelligence index (symbols/edges/chunk embeddings) — a lookup structure,
   not a document; its value is entirely in what `query_code_graph` and
   `search_codebase_semantic` derive from it, not in the tables themselves.
 - Per-model-call token/cost line items (`ModelCallRecord`) — rolled up into the dashboard's
@@ -622,3 +627,74 @@ The dividing line: anything a maintainer needs to decide something (approve a fi
 severity call, understand why a run cost what it cost) is rendered in prose or a labeled
 number. Anything that exists purely so the *next* tool call has correct state stays as
 structured data with no obligation to be readable.
+
+---
+
+## 10. Component choices, and the roads not taken
+
+**Why Vercel + eve.** eve is Vercel's own agent framework, and its primitives map onto this
+exact problem shape without hand-rolling any of them: a native GitHub channel for the webhook
+trigger (HMAC verification, installation tokens, issue/comment dispatch all handled), a
+sandbox abstraction that runs on Vercel Sandbox in production and Docker locally with the same
+code, and durable sessions that survive redeploys. Building the same system framework-less
+would mean writing and maintaining webhook verification, session durability, and sandbox
+lifecycle management myself — all solved problems this assignment isn't testing. Running on
+Vercel follows from the same logic: eve deploys there natively, and Upstash Redis / Neon
+Postgres are both first-class Vercel integrations, so the whole stack provisions through one
+platform instead of stitching together three.
+
+**Why not a router (Vercel AI Gateway / LiteLLM) — direct provider calls instead.** Two
+different things pointed the same direction. First, empirically: a LiteLLM proxy was actually
+built and deployed to Railway with its own Postgres backend early on, and it hit a real
+memory-limit crash on the free tier running as a persistent process — abandoned, not just
+avoided in theory. Second, architecturally: this system calls exactly one provider (Anthropic)
+across exactly three fixed models, decided by task type, not runtime routing logic — a router's
+whole value proposition (dynamic provider selection, fallback, unified cost accounting across
+providers) has nothing to select between here. The one feature a gateway would have given for
+free — automatic cost tracking — turned out unreliable in practice: routing through eve/Vercel
+AI Gateway left `costUsd` at a flat `$0.0000` for direct-provider calls, which is exactly why
+`agent/lib/pricing.ts`'s own `calculateCostUsd()` exists — cost had to be computed by hand
+regardless of whether a gateway sat in front. Paying for an extra hop, an extra service
+dependency, and an extra credential to manage, for a feature that didn't actually work for this
+call shape, wasn't worth it for a single-provider exercise on a fixed $50 budget.
+
+**The embedding service — Voyage AI `voyage-code-4`.** Chosen specifically because it's a
+code-specialized embedding model, not a general-text one repurposed for source — retrieval
+quality against "which function handles X" queries is the entire point of §2.1's index.
+Free-tier fit mattered too: Voyage's unpaid allowance (200M tokens) covers indexing the whole
+Vikunja fork with room to spare, keeping the code-intelligence layer at literal $0 marginal
+cost against the assignment's budget — `indexing/embed-semantic.ts` batches and rate-limits
+specifically to stay inside the unpaid tier's 3 requests/min rather than requiring a card on
+file.
+
+**Why a custom code index + graph, not a ready-made solution.** The original spec named
+CocoIndex (a general indexing/ETL framework) in its tech stack — it isn't actually used
+anywhere in the shipped code. The two extractors (`golang.org/x/tools/go/callgraph` for Go,
+`ts-morph` for TS/Vue) and the embedding pipeline together are a few hundred lines of
+purpose-built TypeScript with exactly one job each. A general framework earns its cost when
+the indexing logic needs to be reusable across many source languages and pipeline shapes;
+this needs two languages and one embedding call pattern, permanently. Learning and fitting a
+general framework's abstractions would have cost more build time than writing the direct
+version, for a capability used by exactly two tools — and every dependency not added is one
+less thing that can break in someone else's release, not just mine.
+
+**§2.1's index store isn't SQLite anymore — here's what changed and why.** It started that way
+(a single `data/code-intelligence.sqlite` file, committed to the repo, deployed as a bundled
+asset — chosen specifically to avoid running *any* persistent server, straight off the
+LiteLLM/Railway memory-limit lesson above). In production it broke: reading a 33MB file via
+`sql.js`/wasm on every cold serverless invocation was fragile, and a since-fixed version of
+`search_codebase_semantic` was fetching all ~5,300 embedding rows over the wire and ranking
+them in JavaScript (measured: 115MB, ~9.3s per search) before that ranking was pushed into
+Postgres itself. The store is now Neon Postgres with the `pgvector` extension — nearest-
+neighbor search happens in the database via the `<=>` cosine-distance operator against an
+IVFFlat index, not in the agent's own memory (see §2.1's corrected diagram above).
+
+**Two different stores, on purpose, not by accident.** Run state (Redis/Upstash) and the
+code-intelligence index (Neon Postgres) are deliberately different technologies for different
+access patterns, not inconsistency. Run tracking is small, frequent, concurrent
+read-modify-write on one JSON blob per run — Redis's atomic Lua-script primitive (§6) is the
+right tool for that race condition specifically. The code index is exact-match SQL joins (the
+call graph) plus approximate nearest-neighbor search over ~1024-dim vectors at thousands of
+rows — a real relational database with `pgvector` is the right tool for that. Using one
+database for both would mean bending one of the two workloads to fit a tool that isn't shaped
+for it.
