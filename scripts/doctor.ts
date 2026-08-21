@@ -201,8 +201,49 @@ async function checkModelAccess(): Promise<void> {
   });
 }
 
+/**
+ * Plan gate. Two things this agent cannot live without are paid-only, and both fail
+ * in ways that look like nothing happening at all:
+ *   - Vercel Sandbox, which eve's turn.started built-in uses to check the repo out
+ *     into /workspace. On Hobby the turn dies in ~1s with no reaction and no comment.
+ *   - AI Gateway access to Claude models, which returns "Free tier users do not have
+ *     access to this model" (bypassable with a direct ANTHROPIC_API_KEY).
+ * The plan is stamped into the OIDC token, so it can be read without an API call.
+ */
+function checkPlan(): void {
+  const token = process.env.VERCEL_OIDC_TOKEN;
+  if (!token) {
+    checks.push({
+      name: "Vercel plan",
+      ok: true,
+      detail: "VERCEL_OIDC_TOKEN not present locally; skipped (run `vercel env pull`).",
+    });
+    return;
+  }
+  try {
+    const part = token.split(".")[1];
+    const padded = part + "=".repeat((4 - (part.length % 4)) % 4);
+    const claims = JSON.parse(Buffer.from(padded, "base64url").toString("utf-8"));
+    const plan = String(claims.plan ?? "unknown");
+    const hobby = plan === "hobby";
+    checks.push({
+      name: "Vercel plan",
+      ok: !hobby,
+      detail: hobby
+        ? "Plan is 'hobby'. Vercel Sandbox is Pro-only, so eve cannot check the repo out " +
+          "into /workspace and every turn dies before it starts — no eyes reaction, no " +
+          "comment, no run row."
+        : `Plan is '${plan}'.`,
+      fix: "Upgrade the team to Pro at vercel.com/acme-629d/~/settings/billing",
+    });
+  } catch {
+    checks.push({ name: "Vercel plan", ok: true, detail: "Could not decode token; skipped." });
+  }
+}
+
 async function main(): Promise<void> {
   loadEnvLocal();
+  checkPlan();
   checkGitHubAuth();
   await checkModelAccess();
   await checkRedis();
