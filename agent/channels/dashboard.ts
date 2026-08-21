@@ -1,7 +1,5 @@
 import { defineChannel, GET, POST } from "eve/channels";
 import { createRedisStore, totalCost, tokenTotals, type BugRun } from "../lib/store";
-import { loadConfig } from "../lib/config";
-import githubChannel from "./github";
 
 const TERMINAL_STATUSES: BugRun["status"][] = ["pr_opened", "failed"];
 
@@ -103,6 +101,32 @@ export default defineChannel({
         : `<form method="post" action="/dashboard/${run.runId}/stop" onsubmit="return confirm('Stop this run now? This cancels the in-flight turn immediately.')">
             <button type="submit" style="background:#c0392b;color:#fff;border:none;padding:0.5rem 1rem;border-radius:4px;cursor:pointer;">Stop this run</button>
           </form>`;
+      // Admin secret is entered per click via prompt() rather than a plain form field: the
+      // resolve-approval route checks it as a request header (matching the other admin routes
+      // on this channel), and a plain <form> cannot set custom headers — this keeps the same
+      // auth mechanism instead of adding a second, weaker one (e.g. a URL query param) just for
+      // this button.
+      const approvalPanel =
+        run.status === "awaiting_approval"
+          ? `<div style="margin:1rem 0;padding:1rem;border:1px solid #e0a800;background:#fff8e1;border-radius:4px;">
+              <p><strong>Awaiting human approval</strong> — open_pr paused this run (see agent/lib/autonomy.ts's requiresApproval). Review the diff in the latest issue comment before deciding.</p>
+              <button type="button" onclick="resolveApproval('${run.runId}','approve')" style="background:#2e7d32;color:#fff;border:none;padding:0.5rem 1rem;border-radius:4px;cursor:pointer;margin-right:0.5rem;">Approve</button>
+              <button type="button" onclick="resolveApproval('${run.runId}','deny')" style="background:#c0392b;color:#fff;border:none;padding:0.5rem 1rem;border-radius:4px;cursor:pointer;">Deny</button>
+              <script>
+                async function resolveApproval(runId, decision) {
+                  if (!confirm('Really ' + decision + ' this fix?')) return;
+                  const secret = prompt('Admin secret:');
+                  if (!secret) return;
+                  const res = await fetch('/dashboard/admin/resolve-approval/' + runId + '?decision=' + decision, {
+                    method: 'POST',
+                    headers: { 'x-admin-secret': secret },
+                  });
+                  if (!res.ok) { alert('Failed: ' + res.status + ' ' + (await res.text())); return; }
+                  location.reload();
+                }
+              </script>
+            </div>`
+          : "";
       const body = `
         <p><a href="/dashboard">&larr; All runs</a></p>
         <h1>#${run.issueNumber}: ${escapeHtml(run.issueTitle)}</h1>
@@ -115,6 +139,7 @@ export default defineChannel({
         <p>Total cost: $${totalCost(run).toFixed(4)} | Fresh tokens: ${formatTokens(
         freshTokens,
       )} | Cached tokens: ${formatTokens(cachedTokens)}</p>
+        ${approvalPanel}
         ${stopButton}
         <h2>Model calls</h2>
         <table>
@@ -186,23 +211,27 @@ export default defineChannel({
     // itself. This exists to unblock a specific paused run in the meantime; the real fix is
     // wiring onComment + surfacing approval questions as GitHub comments. Safe to delete once
     // that's done.
-    POST("/dashboard/admin/resolve-approval", async (req, { receive }) => {
+    //
+    // Uses send() with intent: "resume" and the run's own stored continuationToken — not
+    // receive(), which was tried first and turned out to start a brand-new session instead of
+    // resuming the paused one (confirmed live: a second, unrelated session appeared and had to
+    // be cancelled). getSession(runId).continuationToken is the exact token the paused session
+    // is actually parked under, so resuming against it (with intent: "resume" erroring loudly
+    // if no active session is found, rather than silently starting one) is the reliable path.
+    POST("/dashboard/admin/resolve-approval/:runId", async (req, { params, getSession, send }) => {
       if (req.headers.get("x-admin-secret") !== process.env.ADMIN_RESET_SECRET) {
         return new Response("Forbidden", { status: 403 });
       }
       const url = new URL(req.url);
-      const issueNumberRaw = url.searchParams.get("issueNumber");
       const decision = url.searchParams.get("decision");
-      if (!issueNumberRaw || (decision !== "approve" && decision !== "deny")) {
-        return new Response("issueNumber and decision=approve|deny query params required", {
-          status: 400,
-        });
+      if (decision !== "approve" && decision !== "deny") {
+        return new Response("decision=approve|deny query param required", { status: 400 });
       }
-      const { githubOwner, githubRepo } = loadConfig();
-      const session = await receive(githubChannel, {
-        message: decision,
-        target: { owner: githubOwner, repo: githubRepo, issueNumber: Number(issueNumberRaw) },
+      const target = getSession(params.runId);
+      const session = await send(decision, {
         auth: null,
+        continuationToken: target.continuationToken,
+        intent: "resume",
       });
       return new Response(JSON.stringify({ sessionId: session.id }), {
         headers: { "content-type": "application/json" },
