@@ -26,6 +26,18 @@ export function extractCostRecord(
   if (!usage) return null;
   const inputTokens = usage.inputTokens ?? 0;
   const outputTokens = usage.outputTokens ?? 0;
+  const cacheReadTokens = usage.inputTokenDetails?.cacheReadTokens ?? 0;
+  const cacheWriteTokens = usage.inputTokenDetails?.cacheWriteTokens ?? 0;
+  // Diagnostic: aggregate cost math tonight (49 calls, 2.5M total input tokens, $5.13 actual)
+  // matched full fresh-rate pricing almost exactly, with no visible discount — despite eve's
+  // own harness (harness/prompt-cache.js, tool-loop.js) confirmed to apply an Anthropic cache
+  // breakpoint to the system prompt on every call for a direct-Anthropic model like this one.
+  // Logging the raw breakdown per call to see directly whether cache reads are landing (cheap,
+  // 0.1x) or every call is instead paying the cache *write* premium (1.25x, worse than no
+  // caching) — the aggregate dashboard total can't distinguish those two very different cases.
+  console.log(
+    `[cost-tracking] in=${inputTokens} out=${outputTokens} cacheRead=${cacheReadTokens} cacheWrite=${cacheWriteTokens}`,
+  );
   return {
     phase,
     model,
