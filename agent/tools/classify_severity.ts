@@ -29,14 +29,19 @@ export default defineTool({
   inputSchema,
   outputSchema: severitySchema,
   async execute({ issueNumber, issueTitle, issueBody, rootCause, reproTestPassed }, ctx) {
-    // Lazily creates the run row: ctx.session.id (the real, stable run identifier) only exists
-    // once inside a tool/hook, never at the GitHub channel's onIssue dispatch time (Task 15) —
-    // see the createRun note in Task 8.
     console.log(`[classify_severity] issue #${issueNumber} session=${ctx.session.id}`);
-    // Never swallow: a failed createRun means the run is invisible on the dashboard, which is
-    // exactly the class of silent failure that cost a full debugging session here.
+    // Belt-and-suspenders createRun: agent/hooks/run-tracking.ts already created a placeholder
+    // row at session.started, so this is normally a no-op (createRun's NX semantics never
+    // overwrite an existing row) — it only actually creates a row if that hook somehow didn't
+    // fire. Never swallow: a failed createRun means the run is invisible on the dashboard.
     await store.createRun({ runId: ctx.session.id, issueNumber, issueTitle }).catch((err) => {
       console.error(`[classify_severity] ✖ createRun failed:`, err);
+    });
+    // Overwrite the placeholder's issueNumber/issueTitle ("(investigating…)") with the real
+    // values now that they're known — createRun's NX above will not touch them if the eager
+    // hook already created the row, so this is the one place they actually get set for real.
+    await store.updateRun(ctx.session.id, { issueNumber, issueTitle }).catch((err) => {
+      console.error(`[classify_severity] ✖ updateRun (issue details) failed:`, err);
     });
     const { object, usage } = await generateObject({
       model: haikuModel(),
