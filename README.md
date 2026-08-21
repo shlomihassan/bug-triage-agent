@@ -30,14 +30,14 @@ cost, tokens, and outcome are tracked; every run leaves behind a note for the ne
 **How it was planned:** this wasn't built by improvising against the codebase. It's three
 brainstorm → spec → plan cycles, in this order, each committed to `docs/superpowers/`:
 
-1. [`2026-08-19-agentic-bug-triage-design.md`](../docs/superpowers/specs/2026-08-19-agentic-bug-triage-design.md)
-   / [`-plan.md`](../docs/superpowers/plans/2026-08-19-agentic-bug-triage.md) — the base agent
+1. [`2026-08-19-agentic-bug-triage-design.md`](docs/superpowers/specs/2026-08-19-agentic-bug-triage-design.md)
+   / [`-plan.md`](docs/superpowers/plans/2026-08-19-agentic-bug-triage.md) — the base agent
    itself: triage, fix, autonomy gate, cost tracking.
-2. [`2026-08-20-code-intelligence-design.md`](../docs/superpowers/specs/2026-08-20-code-intelligence-design.md)
-   / [`-plan.md`](../docs/superpowers/plans/2026-08-20-code-intelligence.md) — the index layer
+2. [`2026-08-20-code-intelligence-design.md`](docs/superpowers/specs/2026-08-20-code-intelligence-design.md)
+   / [`-plan.md`](docs/superpowers/plans/2026-08-20-code-intelligence.md) — the index layer
    (§2.2).
-3. [`2026-08-21-slack-integration-design.md`](../docs/superpowers/specs/2026-08-21-slack-integration-design.md)
-   / [`-plan.md`](../docs/superpowers/plans/2026-08-21-slack-integration-plan.md) — Slack (§2.3).
+3. [`2026-08-21-slack-integration-design.md`](docs/superpowers/specs/2026-08-21-slack-integration-design.md)
+   / [`-plan.md`](docs/superpowers/plans/2026-08-21-slack-integration-plan.md) — Slack (§2.3).
 
 Each plan was then executed task-by-task with a fresh implementer + reviewer subagent pair per
 task (Superpowers' subagent-driven-development), not one long freeform session — which is why
