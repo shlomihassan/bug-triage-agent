@@ -101,38 +101,32 @@ export default defineChannel({
         : `<form method="post" action="/dashboard/${run.runId}/stop" onsubmit="return confirm('Stop this run now? This cancels the in-flight turn immediately.')">
             <button type="submit" style="background:#c0392b;color:#fff;border:none;padding:0.5rem 1rem;border-radius:4px;cursor:pointer;">Stop this run</button>
           </form>`;
-      // Earlier attempts to resume this session from a dashboard route failed two different
-      // ways: (1) send() with getSession(runId).continuationToken threw RuntimeNoActiveSession
-      // Error because getSession synthesizes a channel-local "dashboard:..." token, not the
-      // real github one; (2) a plain-text GitHub comment reply ("@bug-triage-agent approve")
-      // doesn't auto-resolve the pending question either, because eve wraps every delivered
-      // message in a <github_context> block that breaks its own option-text matching. This
-      // button avoids both: it sends structured inputResponses (not plain text, so the
-      // context-wrapping issue doesn't apply) against the real continuationToken reconstructed
-      // from run.pendingApproval (captured by github.ts's input.requested handler at the moment
-      // the question was actually asked — not guessed from run.issueNumber alone).
-      const approval = run.pendingApproval;
+      // open_pr.ts parks a high-blast-radius fix (PendingPr, lib/store.ts) instead of asking
+      // eve to pause the session for approval — resuming a paused GitHub-channel session from
+      // this (dashboard) channel turned out to be architecturally unreachable, confirmed three
+      // different ways tonight (2026-08-21): receive() starts an unrelated new session instead
+      // of resuming; send() with getSession()'s token throws RuntimeNoActiveSessionError because
+      // getSession synthesizes a channel-local "dashboard:..." token; send() with a manually
+      // reconstructed *correct* github-format token still throws the same error, because eve
+      // prefixes it with the calling channel's own name regardless of the token's content
+      // ("dashboard:repo:...", not "repo:..."). Opening a PR needs no live agent session at
+      // all — it's just a REST call — so these buttons open/skip it directly via Octokit.
+      const pendingPr = run.pendingPr;
       const approvalPanel =
-        run.status === "awaiting_approval" && approval
+        run.status === "awaiting_approval" && pendingPr
           ? `<div style="margin:1rem 0;padding:1rem;border:1px solid #e0a800;background:#fff8e1;border-radius:4px;">
-              <p><strong>Awaiting human approval</strong>: ${escapeHtml(approval.prompt)}</p>
-              <p>Review the diff in the latest issue comment before deciding.</p>
-              ${approval.options
-                .map(
-                  (opt) =>
-                    `<button type="button" onclick="resolveApproval('${run.runId}','${opt.id}')" style="background:${
-                      opt.id === "deny" ? "#c0392b" : "#2e7d32"
-                    };color:#fff;border:none;padding:0.5rem 1rem;border-radius:4px;cursor:pointer;margin-right:0.5rem;">${escapeHtml(
-                      opt.label,
-                    )}</button>`,
-                )
-                .join("")}
+              <p><strong>Awaiting human approval</strong>: ${escapeHtml(pendingPr.title)}</p>
+              <p>Branch <code>${escapeHtml(pendingPr.branch)}</code> → <code>${escapeHtml(
+              pendingPr.owner,
+            )}/${escapeHtml(pendingPr.repo)}</code>. Review the diff in the latest issue comment before deciding.</p>
+              <button type="button" onclick="resolveApproval('${run.runId}','approve')" style="background:#2e7d32;color:#fff;border:none;padding:0.5rem 1rem;border-radius:4px;cursor:pointer;margin-right:0.5rem;">Approve</button>
+              <button type="button" onclick="resolveApproval('${run.runId}','deny')" style="background:#c0392b;color:#fff;border:none;padding:0.5rem 1rem;border-radius:4px;cursor:pointer;">Deny</button>
               <script>
-                async function resolveApproval(runId, optionId) {
-                  if (!confirm('Really submit "' + optionId + '"?')) return;
+                async function resolveApproval(runId, decision) {
+                  if (!confirm('Really ' + decision + ' this fix?')) return;
                   const secret = prompt('Admin secret:');
                   if (!secret) return;
-                  const res = await fetch('/dashboard/admin/resolve-approval/' + runId + '?optionId=' + encodeURIComponent(optionId), {
+                  const res = await fetch('/dashboard/admin/resolve-pr/' + runId + '?decision=' + decision, {
                     method: 'POST',
                     headers: { 'x-admin-secret': secret },
                   });
@@ -141,11 +135,7 @@ export default defineChannel({
                 }
               </script>
             </div>`
-          : run.status === "awaiting_approval"
-            ? `<div style="margin:1rem 0;padding:1rem;border:1px solid #e0a800;background:#fff8e1;border-radius:4px;">
-                <p><strong>Awaiting human approval</strong>, but no pendingApproval was captured for this run (started before the input.requested handler was added). Reply on the issue instead: <code>@bug-triage-agent approve</code> — though note that path is separately confirmed broken tonight.</p>
-              </div>`
-            : "";
+          : "";
       const body = `
         <p><a href="/dashboard">&larr; All runs</a></p>
         <h1>#${run.issueNumber}: ${escapeHtml(run.issueTitle)}</h1>
@@ -222,33 +212,56 @@ export default defineChannel({
         headers: { "content-type": "application/json" },
       });
     }),
-    // Resolves a paused open_pr approval via structured inputResponses instead of a GitHub
-    // comment reply (see the approvalPanel comment on GET /dashboard/:runId for why the
-    // comment path doesn't work). continuationToken is reconstructed from run.pendingApproval
-    // (captured at question-time by github.ts's input.requested handler, not guessed from
-    // run.issueNumber) — eve's public githubContinuationToken format is `repo:<repositoryId>
-    // :issue:<issueNumber>`. intent: "resume" errors loudly if no active session exists rather
-    // than silently starting a new one, unlike the plain receive()/send() defaults tried
-    // earlier tonight, both of which accidentally created duplicate sessions.
-    POST("/dashboard/admin/resolve-approval/:runId", async (req, { params, send }) => {
+    // Resolves a run.pendingPr (open_pr.ts's parked high-blast-radius fix, lib/store.ts) —
+    // approve opens the real draft PR via Octokit directly, deny just marks the run failed.
+    // Neither needs the original agent session alive: opening a PR is a stateless REST call,
+    // and denying doesn't require telling the (already-finished) agent turn anything. See the
+    // approvalPanel comment on GET /dashboard/:runId for why resuming the session itself isn't
+    // viable from this channel.
+    POST("/dashboard/admin/resolve-pr/:runId", async (req, { params }) => {
       if (req.headers.get("x-admin-secret") !== process.env.ADMIN_RESET_SECRET) {
         return new Response("Forbidden", { status: 403 });
       }
       const url = new URL(req.url);
-      const optionId = url.searchParams.get("optionId");
-      if (!optionId) {
-        return new Response("optionId query param required", { status: 400 });
+      const decision = url.searchParams.get("decision");
+      if (decision !== "approve" && decision !== "deny") {
+        return new Response("decision=approve|deny query param required", { status: 400 });
       }
       const run = await store.getRun(params.runId);
-      if (!run?.pendingApproval) {
-        return new Response("No pendingApproval recorded for this run", { status: 400 });
+      if (!run?.pendingPr) {
+        return new Response("No pendingPr recorded for this run", { status: 400 });
       }
-      const continuationToken = `repo:${run.pendingApproval.repositoryId}:issue:${run.pendingApproval.issueNumber}`;
-      const session = await send(
-        { inputResponses: [{ requestId: run.pendingApproval.requestId, optionId }] },
-        { auth: null, continuationToken, intent: "resume" },
-      );
-      return new Response(JSON.stringify({ sessionId: session.id }), {
+      if (decision === "deny") {
+        await store.updateRun(params.runId, {
+          status: "failed",
+          outcome: "denied",
+          completedAt: new Date().toISOString(),
+        });
+        return new Response(JSON.stringify({ denied: true }), {
+          headers: { "content-type": "application/json" },
+        });
+      }
+      // Same PAT-based Octokit pattern as agent/tools/open_pr.ts's own auto-approved path —
+      // deliberately not the Connect-managed installation token (that's only available inside
+      // channel dispatch/hook contexts, not a plain HTTP route).
+      const { Octokit } = await import("@octokit/rest");
+      const octokit = new Octokit({ auth: process.env.GITHUB_PR_TOKEN });
+      const pr = await octokit.pulls.create({
+        owner: run.pendingPr.owner,
+        repo: run.pendingPr.repo,
+        title: run.pendingPr.title,
+        body: run.pendingPr.body,
+        head: run.pendingPr.branch,
+        base: "main",
+        draft: true,
+      });
+      await store.updateRun(params.runId, {
+        status: "pr_opened",
+        prUrl: pr.data.html_url,
+        outcome: "escalated",
+        completedAt: new Date().toISOString(),
+      });
+      return new Response(JSON.stringify({ prUrl: pr.data.html_url }), {
         headers: { "content-type": "application/json" },
       });
     }),

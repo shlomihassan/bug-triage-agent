@@ -15,19 +15,20 @@ export interface ModelCallRecord {
   readonly at: string;
 }
 
-// Captured from the GitHub channel's "input.requested" event (agent/channels/github.ts) so the
-// dashboard can resolve a paused tool-approval directly via send({inputResponses}) instead of
-// GitHub comment replies — those don't work: eve wraps every delivered message in a
-// <github_context> block, which breaks its own plain-text option-matching for approve/deny.
-// repositoryId/issueNumber are stored here (not just derived from run.issueNumber) because
-// they're exactly what's needed to reconstruct the session's real continuationToken
-// (`repo:${repositoryId}:issue:${issueNumber}`, eve's public githubContinuationToken format).
-export interface PendingApproval {
-  readonly requestId: string;
-  readonly repositoryId: number;
-  readonly issueNumber: number;
-  readonly prompt: string;
-  readonly options: ReadonlyArray<{ readonly id: string; readonly label: string }>;
+// A high-blast-radius fix parked by open_pr.ts instead of being opened immediately. Deliberately
+// NOT resolved through eve's native tool-approval/HITL pause: that requires resuming the exact
+// session that's paused, and eve scopes session resumption strictly to the channel that owns
+// it (github, here) — confirmed live (2026-08-21) after three different approaches all failed
+// with the same root cause (RuntimeNoActiveSessionError, or a plain-text reply that doesn't
+// match eve's option-matching through the <github_context>-wrapped message). Opening a PR is
+// just a REST call — it doesn't need the agent's session alive at all, so the dashboard can
+// finish it directly via Octokit once a human approves, with no session resumption involved.
+export interface PendingPr {
+  readonly owner: string;
+  readonly repo: string;
+  readonly title: string;
+  readonly body: string;
+  readonly branch: string;
 }
 
 export interface BugRun {
@@ -37,12 +38,19 @@ export interface BugRun {
   status: "triaging" | "fixing" | "awaiting_approval" | "pr_opened" | "escalated" | "failed";
   severity?: Severity;
   blastRadiusTier?: BlastRadiusTier;
-  outcome?: "auto_resolved" | "escalated" | "could_not_reproduce" | "timed_out" | "cancelled" | "cost_capped";
+  outcome?:
+    | "auto_resolved"
+    | "escalated"
+    | "could_not_reproduce"
+    | "timed_out"
+    | "cancelled"
+    | "cost_capped"
+    | "denied";
   prUrl?: string;
   startedAt: string;
   completedAt?: string;
   modelCalls: ModelCallRecord[];
-  pendingApproval?: PendingApproval;
+  pendingPr?: PendingPr;
 }
 
 // Shared with dashboard.ts and run-tracking.ts's cost-cap check — single source of truth for

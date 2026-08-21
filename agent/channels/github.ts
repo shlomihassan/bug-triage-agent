@@ -1,8 +1,6 @@
 import { connectGitHubCredentials } from "@vercel/connect/eve";
 import { defaultGitHubAuth, githubChannel } from "eve/channels/github";
-import { createRedisStore } from "../lib/store";
 
-const store = createRedisStore();
 const BOT_NAME = "bug-triage-agent";
 // eve's own defaultOnComment (equivalent mention-gate logic) isn't part of the public
 // `eve/channels/github` export surface — only its type-level building blocks are — so this
@@ -41,51 +39,19 @@ export default githubChannel({
     console.log(`[github] dispatching issue #${issue.issueNumber} to agent`);
     return { auth };
   },
-  // Without this, a human replying on the issue thread does nothing at all — confirmed live
-  // (2026-08-21): a run paused at open_pr's requiresApproval gate had no way to be approved or
-  // denied from GitHub, because no onComment handler existed to dispatch the reply. eve's
-  // human-in-the-loop docs (docs/tools/human-in-the-loop.md) describe exactly this path: "A
-  // follow-up whose text matches an option ID, option label, or numeric option index resolves
-  // automatically, including approval options such as approve and deny" — but that only fires
-  // if a comment reaches the session at all. Dispatching on any `@bug-triage-agent` mention is
-  // the standard way eve resumes a paused session (unlike a same-session-but-wrong-channel
-  // workaround, which was tried first and actually started an unrelated duplicate session
-  // instead of resuming the paused one — send()/getSession() are scoped to the calling
-  // channel, so only this channel can legitimately resume its own sessions).
+  // Lets a maintainer @-mention the bot on the issue thread to continue the conversation
+  // generally (e.g. asking a follow-up question). NOT used for open_pr approvals — see
+  // PendingPr in lib/store.ts for why that's resolved directly from the dashboard instead of
+  // through a resumed session.
   onComment: (ctx, comment) => {
     if (!MENTION_PATTERN.test(comment.body)) return null;
     const auth = defaultGitHubAuth(ctx);
     if (!auth) return null;
     return { auth };
   },
-  // Per eve's GitHubChannelEvents docs, a handler supplied for a key *replaces* the built-in
-  // rather than running alongside it — turn.started/message.completed/session.failed/turn.failed
-  // are load-bearing built-ins (checkout, comment posting, error reporting) and must stay
-  // undefined here so eve's defaults keep running. input.requested has no built-in handler, so
-  // defining it is additive, not a replacement.
-  events: {
-    // Captures a paused tool-approval's requestId/options so the dashboard can resolve it
-    // directly via send({inputResponses}) — GitHub comment replies don't work for this: eve
-    // wraps every delivered message in a <github_context> block, which breaks its own
-    // plain-text option-matching for approve/deny (confirmed live, 2026-08-21). Only
-    // "tool-approval" is stored; a plain "question" input request isn't something the dashboard
-    // has a use for yet.
-    async "input.requested"(data, channel, ctx) {
-      const approval = data.requests.find((r) => r.kind === "tool-approval");
-      if (!approval) return;
-      await store
-        .updateRun(ctx.session.id, {
-          pendingApproval: {
-            requestId: approval.requestId,
-            repositoryId: channel.repository.id,
-            issueNumber: channel.conversation.issueNumber ?? 0,
-            prompt: approval.prompt,
-            options: approval.options ?? [],
-          },
-        })
-        .catch((err) => {
-          console.error(`[github] ✖ storing pendingApproval failed:`, err);
-        });
-    },
-  },
+  // NOTE: deliberately no `events` overrides here. Per eve's GitHubChannelEvents docs, a handler
+  // supplied for a key *replaces* the built-in rather than running alongside it — and the
+  // built-ins are load-bearing: `turn.started` does the eyes reaction plus the repo checkout into
+  // /workspace, and `turn.failed`/`session.failed` post the error comment on the issue. Adding
+  // log-only handlers here would silently disable the checkout and swallow failure reporting.
 });
