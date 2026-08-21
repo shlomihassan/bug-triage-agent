@@ -24,11 +24,26 @@ import { anthropic } from "@ai-sdk/anthropic";
 // through a *separate* sessionTimeoutWorkflow that force-kills the session directly — that kill
 // does not reliably reach the application-level session.completed/session.failed hooks (see
 // agent/hooks/run-tracking.ts), so a session cut off here can look identical, on our own
-// dashboard, to one still actively working. run-tracking.ts's proactive check (on the reliably-
-// firing step.completed event, watching elapsed time against SESSION_TIMEOUT_MS) is what
-// actually catches this now — extending the ceiling further makes that margin meaningful rather
-// than the graceful-mark-off racing the hard kill.
-export const SESSION_TIMEOUT_MS = 25 * 60 * 1000;
+// dashboard, to one still actively working.
+//
+// Raised again, much further (2026-08-21, third pass): 25 minutes silently killed a run that
+// was correctly PAUSED waiting on a human to approve a high-blast-radius fix (open_pr's
+// requiresApproval gate, agent/lib/autonomy.ts) — confirmed live via `vercel agent-runs inspect`
+// showing Status: Completed, Duration: 25m, with the run's last events being a plain timeout
+// disposal, not an approval response. eve enforces sessionTimeoutMs as a flat wall-clock
+// deadline from session start (docs/concepts/sessions-runs-and-streaming.md: "Sessions last 30
+// days by default"), with no distinction between actively-executing time and time spent idle
+// waiting on a human — so any approval-gated fix was guaranteed to die before a human could
+// realistically review and respond, silently, with no way to recover the paused session
+// afterward (its continuationToken has no active session left to resume against). A session
+// idle on a pending approval accrues no further cost (no model calls happen while waiting), so
+// extending this is safe — the real spend guard is now run-tracking.ts's cost cap alone (see
+// its own comment on why the old proactive time-based kill was removed), not this ceiling. This
+// exists only as an absolute backstop for a session that hangs without ever completing a step
+// at all. 24 hours is a realistic upper bound for a human to notice and act on a pending
+// approval; still finite, unlike disabling it outright (`false`), because there's no other
+// backstop for a session that never advances at all (a cost cap can't catch zero-cost hangs).
+export const SESSION_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 
 // Cost analysis (2026-08-21, run #16 real data): 49 model calls, 2,507,396 total input tokens,
 // $5.13, and 99.98% of that cost was input tokens, not output. Per-call input tokens grew
