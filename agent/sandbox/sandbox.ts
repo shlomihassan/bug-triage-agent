@@ -1,4 +1,5 @@
 import { defineSandbox } from "eve/sandbox";
+import { defaultBackend } from "eve/sandbox";
 
 // Two jobs, in order.
 //
@@ -21,6 +22,16 @@ const OWNER = process.env.GITHUB_OWNER ?? "shlomihassan";
 const REPO = process.env.GITHUB_REPO ?? "vikunja";
 
 export default defineSandbox({
+  // defaultBackend keeps eve's availability chain intact — Vercel Sandbox when deployed, Docker
+  // locally — while pointing the Docker arm at an image that actually has the Go toolchain.
+  // eve's stock image (ghcr.io/vercel/eve) ships git/node/pnpm but no go and no mage, so a live
+  // run hit `which go` → exit 127 and could never satisfy phase 2's "reproduce with a failing Go
+  // test" gate. Build it with:
+  //   docker build -f sandbox.Dockerfile -t bug-triage-sandbox:latest .
+  // The vercel arm is left at its default; on Vercel the published image applies as before.
+  backend: defaultBackend({
+    docker: { image: process.env.SANDBOX_IMAGE ?? "bug-triage-sandbox:latest" },
+  }),
   async onSession({ use }) {
     const sandbox = await use();
     await sandbox.run({ command: "git config --global --add safe.directory /workspace" });
