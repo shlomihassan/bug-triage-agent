@@ -76,6 +76,10 @@ export default githubChannel({
     // tracking record is created lazily inside classify_severity (Task 10), the first tool call
     // in the flow, once ctx.session.id is actually available; see the createRun note in Task 8.
     console.log(`[github] ✅ Dispatching issue #${issue.issueNumber} to agent`);
-    return { auth: defaultGitHubAuth(ctx) };
+    const initialMessage = `GitHub issue #${issue.issueNumber}: ${issue.raw.title}\n\n${issue.raw.body || "No description provided."}`;
+    return {
+      auth: defaultGitHubAuth(ctx),
+      context: [initialMessage],
+    };
   },
 });
