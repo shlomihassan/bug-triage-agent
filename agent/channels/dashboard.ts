@@ -1,5 +1,6 @@
 import { defineChannel, GET, POST } from "eve/channels";
 import { createRedisStore, totalCost, tokenTotals, type BugRun } from "../lib/store";
+import { resolvePendingPr } from "../lib/pr-approval";
 
 const TERMINAL_STATUSES: BugRun["status"][] = ["pr_opened", "failed"];
 
@@ -227,41 +228,13 @@ export default defineChannel({
       if (decision !== "approve" && decision !== "deny") {
         return new Response("decision=approve|deny query param required", { status: 400 });
       }
-      const run = await store.getRun(params.runId);
-      if (!run?.pendingPr) {
-        return new Response("No pendingPr recorded for this run", { status: 400 });
-      }
-      if (decision === "deny") {
-        await store.updateRun(params.runId, {
-          status: "failed",
-          outcome: "denied",
-          completedAt: new Date().toISOString(),
-        });
-        return new Response(JSON.stringify({ denied: true }), {
-          headers: { "content-type": "application/json" },
-        });
-      }
-      // Same PAT-based Octokit pattern as agent/tools/open_pr.ts's own auto-approved path —
-      // deliberately not the Connect-managed installation token (that's only available inside
-      // channel dispatch/hook contexts, not a plain HTTP route).
       const { Octokit } = await import("@octokit/rest");
       const octokit = new Octokit({ auth: process.env.GITHUB_PR_TOKEN });
-      const pr = await octokit.pulls.create({
-        owner: run.pendingPr.owner,
-        repo: run.pendingPr.repo,
-        title: run.pendingPr.title,
-        body: run.pendingPr.body,
-        head: run.pendingPr.branch,
-        base: "main",
-        draft: true,
-      });
-      await store.updateRun(params.runId, {
-        status: "pr_opened",
-        prUrl: pr.data.html_url,
-        outcome: "escalated",
-        completedAt: new Date().toISOString(),
-      });
-      return new Response(JSON.stringify({ prUrl: pr.data.html_url }), {
+      const result = await resolvePendingPr(store, params.runId, decision, octokit);
+      if (!result.ok) {
+        return new Response(result.reason, { status: 400 });
+      }
+      return new Response(JSON.stringify(result), {
         headers: { "content-type": "application/json" },
       });
     }),
