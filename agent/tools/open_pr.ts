@@ -65,7 +65,9 @@ export default defineTool({
         outcome,
         completedAt: new Date().toISOString(),
       })
-      .catch(() => {});
+      // The PR is already open at this point; losing the update silently leaves the dashboard
+      // claiming the run is still in flight forever.
+      .catch((err) => console.error(`[open_pr] ✖ updateRun failed:`, err));
     return { prUrl: pr.data.html_url, prNumber: pr.data.number };
   },
 });

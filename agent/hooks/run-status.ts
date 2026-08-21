@@ -32,7 +32,11 @@ export default defineHook({
       // is created lazily by classify_severity's (or report_could_not_reproduce's) first tool
       // call, so an input.requested event firing before that has nothing to update yet —
       // dropping it here is acceptable for the same reason cost-tracking.ts drops its own.
-      await store.updateRun(ctx.session.id, { status: "awaiting_approval" }).catch(() => {});
+      await store.updateRun(ctx.session.id, { status: "awaiting_approval" }).catch((err) => {
+        // "Unknown run" is the expected benign race described above; anything else is real.
+        if (err instanceof Error && err.message.startsWith("Unknown run")) return;
+        console.error(`[run-status] ✖ updateRun failed:`, err);
+      });
     },
   },
 });

@@ -75,13 +75,16 @@ export function createRedisStore(): BugRunStore {
   const url = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL;
   const token = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN;
 
-  console.log(`[store] 🔌 Initializing Redis store: URL=${!!url} Token=${!!token}`);
+  // Loud on misconfiguration, quiet on success: createRedisStore() runs at module scope in every
+  // tool file, so an unconditional success log fires ~8x per request and buries real signal.
   if (!url || !token) {
-    console.error("❌ [store] Redis REST credentials not configured - store will fail!");
+    console.error(
+      "[store] ✖ Redis REST credentials missing (need UPSTASH_REDIS_REST_URL/TOKEN or " +
+        "KV_REST_API_URL/TOKEN). Run tracking will fail.",
+    );
   }
 
   const redis = new Redis({ url, token });
-  console.log(`[store] ✅ Redis client created`);
 
 
   return {

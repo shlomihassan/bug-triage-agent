@@ -18,9 +18,7 @@ const inputSchema = z.object({
   reproTestPassed: z.boolean(),
 });
 
-console.log(`[tools] 📦 Loading classify_severity tool`);
 const store = createRedisStore();
-console.log(`[tools] ✅ classify_severity tool loaded`);
 
 export default defineTool({
   description:
@@ -34,10 +32,11 @@ export default defineTool({
     // Lazily creates the run row: ctx.session.id (the real, stable run identifier) only exists
     // once inside a tool/hook, never at the GitHub channel's onIssue dispatch time (Task 15) —
     // see the createRun note in Task 8.
-    console.log(`[classify_severity] Starting for issue #${issueNumber}: ${issueTitle}`);
-    console.log(`[classify_severity] Session ID: ${ctx.session.id}`);
+    console.log(`[classify_severity] issue #${issueNumber} session=${ctx.session.id}`);
+    // Never swallow: a failed createRun means the run is invisible on the dashboard, which is
+    // exactly the class of silent failure that cost a full debugging session here.
     await store.createRun({ runId: ctx.session.id, issueNumber, issueTitle }).catch((err) => {
-      console.error(`[classify_severity] Failed to create run:`, err);
+      console.error(`[classify_severity] ✖ createRun failed:`, err);
     });
     const { object, usage } = await generateObject({
       model: haikuModel(),
@@ -60,10 +59,15 @@ export default defineTool({
         outputTokens,
         at: new Date().toISOString(),
       })
-      .catch(() => {});
+      .catch((err) => {
+        // Swallowing this blinds the cost dashboard and the spend guardrail.
+        console.error(`[classify_severity] ✖ recordModelCall failed:`, err);
+      });
     await store
       .updateRun(ctx.session.id, { severity: object.severity, status: "fixing" })
-      .catch(() => {});
+      .catch((err) => {
+        console.error(`[classify_severity] ✖ updateRun failed:`, err);
+      });
     return object;
   },
 });

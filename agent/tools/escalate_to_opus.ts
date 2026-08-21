@@ -41,7 +41,9 @@ export default defineTool({
         outputTokens,
         at: new Date().toISOString(),
       })
-      .catch(() => {});
+      // Opus is the most expensive call in the system — losing its cost record silently is the
+      // worst case for the spend guardrail.
+      .catch((err) => console.error(`[escalate_to_opus] ✖ recordModelCall failed:`, err));
     return { suggestion: text };
   },
 });

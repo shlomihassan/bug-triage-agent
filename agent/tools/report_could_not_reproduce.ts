@@ -19,14 +19,16 @@ export default defineTool({
     // Lazily creates the run row exactly like classify_severity (Task 10) does, for the same
     // reason — this can be the very first tool call of a run that never reaches triage's
     // severity step at all.
-    await store.createRun({ runId: ctx.session.id, issueNumber, issueTitle }).catch(() => {});
+    await store
+      .createRun({ runId: ctx.session.id, issueNumber, issueTitle })
+      .catch((err) => console.error(`[report_could_not_reproduce] ✖ createRun failed:`, err));
     await store
       .updateRun(ctx.session.id, {
         status: "failed",
         outcome: "could_not_reproduce",
         completedAt: new Date().toISOString(),
       })
-      .catch(() => {});
+      .catch((err) => console.error(`[report_could_not_reproduce] ✖ updateRun failed:`, err));
     void whatWasTried; // surfaced in the agent's own reply comment, not stored structurally
     return { ok: true };
   },

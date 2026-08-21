@@ -49,8 +49,10 @@ export default defineTool({
         outputTokens,
         at: new Date().toISOString(),
       })
-      .catch(() => {});
-    await store.updateRun(ctx.session.id, { blastRadiusTier: object.blastRadiusTier }).catch(() => {});
+      .catch((err) => console.error(`[assess_blast_radius] ✖ recordModelCall failed:`, err));
+    await store
+      .updateRun(ctx.session.id, { blastRadiusTier: object.blastRadiusTier })
+      .catch((err) => console.error(`[assess_blast_radius] ✖ updateRun failed:`, err));
     return object;
   },
 });
