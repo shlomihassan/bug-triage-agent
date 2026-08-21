@@ -16,11 +16,17 @@ don't rediscover file locations or patterns already documented there.
 
 ## 1. Triage (read-only — do not edit any files yet)
 
-1. Read the issue title and body. Call `search_codebase_semantic` with a description of
-   the reported behavior to find candidate files fast, then use `glob`/`grep` to zoom in
-   and confirm — don't read broadly before trying semantic search first. Both
-   `search_codebase_semantic` and `query_code_graph` report **repo-relative** paths like
-   `pkg/models/tasks.go`; prefix them with `/workspace/` to read or edit the file.
+1. Read the issue title and body. **Your very first tool call after `read_notes` must be
+   `search_codebase_semantic`** with a description of the reported behavior — before any
+   `grep`, `find`, `glob`, or manual file exploration, and even if prior notes already
+   suggest a likely file. Notes give you *context*, not a substitute for confirming with the
+   index — the codebase may have changed since a note was written, and skipping the call
+   defeats the point of having a semantic index at all: it exists specifically to replace
+   slow, expensive manual exploration, and every extra minute spent grepping instead is
+   real, avoidable time and cost. Only fall back to `glob`/`grep` if the tool returns no
+   useful matches or errors. Both `search_codebase_semantic` and `query_code_graph` report
+   **repo-relative** paths like `pkg/models/tasks.go`; prefix them with `/workspace/` to
+   read or edit the file.
 2. Reproduce the bug: write a targeted failing test that demonstrates exactly the reported
    behavior.
    - Backend: a Go test in the relevant `pkg/models/*_test.go` file, run with
