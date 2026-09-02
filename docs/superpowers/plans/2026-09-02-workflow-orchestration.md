@@ -28,9 +28,16 @@ Zod.
   — untouched by this plan.
 - Ax / prompt optimization and Langfuse online evaluation are out of scope.
 - `agent/instructions.md` keeps identity + hard safety constraints as always-on text; the
-  Phase 1/2/3 prose currently there is what Tasks 2-4's tools replace, and Task 6 trims accordingly
-  — but only for the parts these tasks actually cover (branch creation, commit/push, check running).
-  The rest of the file's phase-sequencing prose stays as-is until the deferred Workflow task lands.
+  Phase 1/2/3 prose currently there is what Tasks 2-4's tools replace. The rest of the file's
+  phase-sequencing prose stays as-is until the deferred Workflow task lands.
+- **Feature flag, not a hard cutover**: `agent/instructions.md` is never edited by this plan, and
+  `open_pr`'s existing input schema keeps `severity`/`blastRadiusTier` as valid optional fields.
+  A single env var, `ENABLE_DETERMINISTIC_PHASE2` (unset/`"false"` by default), gates every
+  behavior change: off, the currently-running agent is byte-for-byte unaffected (same prose, same
+  `open_pr` field-trusting behavior); on, a dynamic instructions override
+  (`agent/instructions/phase2-tools.ts`, Task 6) tells the model to use the new tools instead, and
+  `open_pr` (Task 5) sources severity/blastRadiusTier from the store instead of the model's input.
+  Rolling back is flipping the env var, not reverting code.
 - All new sandbox-executing code uses `ctx.getSandbox()` → `sandbox.run({ command, workingDirectory })`
   → `{ exitCode, stdout, stderr }` — this exact shape is confirmed directly from
   `node_modules/@ai-sdk/provider-utils/dist/index.d.ts` (the type Eve's `SandboxSession` is built
@@ -46,9 +53,11 @@ Zod.
 - `tests/commit_and_push.test.ts` (new)
 - `agent/tools/run_checks.ts` (new) — runs the five check commands, returns structured results.
 - `tests/run_checks.test.ts` (new)
-- `agent/tools/open_pr.ts` (modify) — drop `severity`/`blastRadiusTier` from input, read from store.
-- `tests/open-pr-approval.test.ts` (modify) — add coverage for the new field-sourcing behavior.
-- `agent/instructions.md` (modify) — remove the raw git-command prose Tasks 2-3 now cover.
+- `agent/tools/open_pr.ts` (modify) — behind `ENABLE_DETERMINISTIC_PHASE2`, read severity/
+  blastRadiusTier from the store instead of trusting the model's input.
+- `tests/open-pr-approval.test.ts` (modify) — add coverage for both flag states.
+- `agent/instructions/phase2-tools.ts` (new) — dynamic instructions override, active only when
+  `ENABLE_DETERMINISTIC_PHASE2=true`. `agent/instructions.md` itself is never edited.
 - `scripts/spike-session-turns.ts` (new, Task 1) — throwaway investigation script.
 - `evals/evals.config.ts` (new) — required run-wide eval config (judge model default).
 - `evals/safety-and-sequence.eval.ts` (new) — gates 1-4 from the spec (no labeled data needed).
@@ -528,7 +537,7 @@ git commit -m "feat: add run_checks tool, replacing five raw check commands in i
 
 ---
 
-### Task 5: Fix `open_pr` to read severity/blastRadiusTier from the store
+### Task 5: Flag-gate `open_pr` to optionally read severity/blastRadiusTier from the store
 
 **Files:**
 - Modify: `agent/tools/open_pr.ts`
@@ -538,14 +547,18 @@ git commit -m "feat: add run_checks tool, replacing five raw check commands in i
 - Consumes: `store.getRun(runId): Promise<BugRun | null>` (existing, `agent/lib/store.ts`) —
   `BugRun.severity?: Severity` and `BugRun.blastRadiusTier?: BlastRadiusTier` are already written
   by `classify_severity.ts` and `assess_blast_radius.ts` earlier in the same run.
-- Modifies: `openPrInputSchema` drops `severity` and `blastRadiusTier`.
+- `openPrInputSchema` keeps `severity`/`blastRadiusTier` as **optional** fields — this is the
+  point of the flag approach: the schema stays backward-compatible with the model still passing
+  them (today's behavior), it's just ignored in favor of the store when the flag is on.
 - Modifies: `openPrApprovalPolicy`'s signature changes from taking `toolInput` alone to also
-  needing the resolved `severity`/`blastRadiusTier` — see Step 3 below for the exact new shape.
+  needing the already-resolved `severity`/`blastRadiusTier` — see Step 3 below for the exact new
+  shape. The `execute()` function is what decides *where* those values come from, based on the
+  flag; the policy function itself doesn't know or care which source they came from.
 
 - [ ] **Step 1: Write the failing test for the new field-sourcing behavior**
 
-Add to `tests/open-pr-approval.test.ts` (keep the existing tests; the `validInput` object loses its
-`severity`/`blastRadiusTier` keys since those are no longer part of the tool's input schema):
+Add to `tests/open-pr-approval.test.ts` (keep the existing tests; `validInput` keeps its
+`severity`/`blastRadiusTier` keys, matching the schema staying backward-compatible):
 
 ```typescript
 // tests/open-pr-approval.test.ts
@@ -557,6 +570,8 @@ const validInput = {
   branch: "fix/issue-1",
   title: "Fix it",
   body: "Body",
+  severity: "medium",
+  blastRadiusTier: "low",
   filesChanged: 1,
   linesChanged: 10,
   checksAllPassed: true,
@@ -566,21 +581,13 @@ const validInput = {
 describe("openPrApprovalPolicy", () => {
   it("allows a small, safe, passing fix through without approval", () => {
     expect(
-      openPrApprovalPolicy({
-        toolInput: validInput,
-        severity: "medium",
-        blastRadiusTier: "low",
-      }),
+      openPrApprovalPolicy({ toolInput: validInput, severity: "medium", blastRadiusTier: "low" }),
     ).toBe("not-applicable");
   });
 
   it("requires approval for a high-blast-radius fix", () => {
     expect(
-      openPrApprovalPolicy({
-        toolInput: validInput,
-        severity: "medium",
-        blastRadiusTier: "high",
-      }),
+      openPrApprovalPolicy({ toolInput: validInput, severity: "medium", blastRadiusTier: "high" }),
     ).toBe("user-approval");
   });
 
@@ -600,7 +607,7 @@ describe("openPrApprovalPolicy", () => {
     ).toBe("user-approval");
   });
 
-  it("fails closed when severity or blastRadiusTier weren't resolved from the store", () => {
+  it("fails closed when severity or blastRadiusTier weren't resolved", () => {
     expect(
       openPrApprovalPolicy({ toolInput: validInput, severity: undefined, blastRadiusTier: "low" }),
     ).toBe("user-approval");
@@ -614,8 +621,7 @@ describe("openPrApprovalPolicy", () => {
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `npx vitest run tests/open-pr-approval.test.ts`
-Expected: FAIL — `openPrApprovalPolicy` doesn't accept a `severity`/`blastRadiusTier` argument yet
-(TypeScript error and/or wrong runtime result).
+Expected: FAIL — `openPrApprovalPolicy` doesn't accept a `severity`/`blastRadiusTier` argument yet.
 
 - [ ] **Step 3: Modify `open_pr.ts`**
 
@@ -636,6 +642,11 @@ export const openPrInputSchema = z.object({
   branch: z.string().min(1),
   title: z.string().min(1),
   body: z.string().min(1),
+  // Optional, not removed: kept so the old, currently-running instructions.md prose (which still
+  // tells the model to report these directly) keeps working unchanged when
+  // ENABLE_DETERMINISTIC_PHASE2 is off. See execute()'s flag branch below.
+  severity: z.enum(["critical", "high", "medium", "low"]).optional(),
+  blastRadiusTier: z.enum(["high", "medium", "low"]).optional(),
   filesChanged: z.number().int().nonnegative(),
   linesChanged: z.number().int().nonnegative(),
   checksAllPassed: z.boolean(),
@@ -644,10 +655,6 @@ export const openPrInputSchema = z.object({
 
 const store = createRedisStore();
 
-// severity/blastRadiusTier are no longer part of the tool's input — they're read from the run's
-// own store record (written earlier by classify_severity/assess_blast_radius in this same run)
-// instead of trusted from the model's re-report. openPrApprovalPolicy now takes them as separate,
-// already-resolved arguments so it stays testable without needing a store/session in tests.
 export function openPrApprovalPolicy({
   toolInput,
   severity,
@@ -666,13 +673,24 @@ export function openPrApprovalPolicy({
 export default defineTool({
   description:
     "Open a draft pull request for a fix that has already been committed to a branch in the " +
-    "sandbox and pushed to the fork. Never call this before pushing the branch.",
+    "sandbox and pushed to the fork. Provide the severity/blast-radius/diff-size/check-result " +
+    "fields honestly — they determine whether this runs automatically or is parked for human " +
+    "approval on the dashboard. Never call this before pushing the branch.",
   inputSchema: openPrInputSchema,
   async execute(input, ctx) {
     const config = loadConfig();
-    const run = await store.getRun(ctx.session.id).catch(() => null);
-    const severity = run?.severity;
-    const blastRadiusTier = run?.blastRadiusTier;
+
+    // Flag off (default): exactly today's behavior — trust the model's own input fields.
+    // Flag on: severity/blastRadiusTier are read from the run record instead, overriding
+    // whatever the model passed (it may pass nothing at all once agent/instructions/
+    // phase2-tools.ts, Task 6, stops asking it to).
+    let severity = input.severity;
+    let blastRadiusTier = input.blastRadiusTier;
+    if (process.env.ENABLE_DETERMINISTIC_PHASE2 === "true") {
+      const run = await store.getRun(ctx.session.id).catch(() => null);
+      severity = run?.severity;
+      blastRadiusTier = run?.blastRadiusTier;
+    }
 
     if (openPrApprovalPolicy({ toolInput: input, severity, blastRadiusTier }) === "user-approval") {
       await store
@@ -726,98 +744,98 @@ Expected: PASS (5 tests).
 - [ ] **Step 5: Typecheck**
 
 Run: `npm run typecheck`
-Expected: no errors. If `requiresApproval`'s `AutonomyInput` type in `agent/lib/autonomy.ts`
-doesn't structurally match `{ ...parsed.data, severity, blastRadiusTier }` (it shouldn't — check
-`agent/lib/autonomy.ts`'s `AutonomyInput` interface fields against `openPrInputSchema`'s remaining
-fields plus `severity`/`blastRadiusTier` before assuming this compiles cleanly), fix the object
-shape passed to `requiresApproval` to match exactly.
+Expected: no errors.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Manually verify the flag-off path is truly unaffected**
+
+Run: `npx vitest run tests/open-pr-approval.test.ts` with `ENABLE_DETERMINISTIC_PHASE2` unset in
+the shell (the default) — confirm all 5 tests pass identically to Step 4. This is the concrete
+check that flag-off behavior didn't regress.
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add agent/tools/open_pr.ts tests/open-pr-approval.test.ts
-git commit -m "fix: open_pr reads severity/blastRadiusTier from the store instead of trusting model re-report"
+git commit -m "feat: flag-gate open_pr to read severity/blastRadiusTier from the store"
 ```
 
 ---
 
-### Task 6: Trim `instructions.md`
+### Task 6: Flag-gated dynamic instructions override for Phase 2
 
 **Files:**
-- Modify: `agent/instructions.md`
+- Create: `agent/instructions/phase2-tools.ts`
 
-**Interfaces:** None — this is prose editing, not code.
+**Interfaces:**
+- Consumes: `defineDynamic`, `defineInstructions` from `eve/instructions` — confirmed against
+  `node_modules/eve/dist/src/public/instructions/index.d.ts` and
+  `node_modules/eve/dist/src/public/definitions/instructions.d.ts`: `defineDynamic({ events: {
+  "session.started": (event, ctx) => ... } })`, and `defineInstructions({ markdown: string })`
+  (the field is `markdown`, not `content`). Files under `agent/instructions/*.ts` are discovered
+  alongside `agent/instructions.md`, which this task does **not** touch.
+- `agent/instructions.md` is completely unmodified by this task — its raw git-command prose stays
+  exactly as it is today. This file only adds an override on top, active solely when
+  `ENABLE_DETERMINISTIC_PHASE2=true`.
 
-- [ ] **Step 1: Replace the raw git-command steps with tool references**
+- [ ] **Step 1: Write `agent/instructions/phase2-tools.ts`**
 
-In the "## 2. Solve" section of `agent/instructions.md`:
+```typescript
+// agent/instructions/phase2-tools.ts
+//
+// Feature-flagged override for Phase 2 of agent/instructions.md. Flag off (default): this
+// resolver returns undefined, contributing nothing — agent/instructions.md's existing raw
+// git-command prose applies exactly as it does today, completely unaffected. Flag on: this
+// appends override text telling the model to use create_branch/commit_and_push/run_checks
+// instead. agent/instructions.md itself is never edited, so flipping the env var back off
+// instantly restores the old, currently-running behavior with zero code changes.
+import { defineDynamic, defineInstructions } from "eve/instructions";
 
-Replace:
-```
-1. Create a branch: `git -C /workspace checkout -b fix/issue-<number>`.
-```
-with:
-```
-1. Call `create_branch` with the issue number.
-```
-
-Replace:
-```
-2. Edit code until the repro test passes. Then run the full check suite:
-   - Backend changes: `mage lint` and `mage test:web` (or `mage test:feature`, whichever
-     covers the touched package) from `/workspace`.
-   - Frontend changes: `pnpm lint` and `pnpm typecheck` and `pnpm test:unit` from
-     `/workspace/frontend`.
-```
-with:
-```
-2. Edit code until the repro test passes. Then call `run_checks` with `scope` set to
-   `"backend"`, `"frontend"`, or `"both"` depending on which files you changed.
-```
-
-Replace:
-```
-4. Commit and push the branch: `git -C /workspace add -A && git -C /workspace
-   commit -m "fix: <short description>" && git -C /workspace push origin
-   fix/issue-<number>`.
-```
-with:
-```
-4. Call `commit_and_push` with the branch name and a short description of the fix.
-```
-
-Remove the `severity`/`blastRadiusTier` fields from step 5's list of `open_pr` fields to report
-(they're now read automatically from the run record, not supplied by you):
-
-Replace:
-```
-5. Call `open_pr` with the issue number, branch name, a PR title/body (include: issue
-   link, root cause, the repro test, verification results, blast-radius rationale), and
-   the severity/blastRadiusTier/filesChanged/linesChanged/checksAllPassed/reproTestPassed
-   fields — report these honestly; they decide whether this runs automatically or pauses
-   for your approval. If it pauses, explain in your next reply what specifically needs a
-   human decision (not just "please approve").
-```
-with:
-```
-5. Call `open_pr` with the issue number, branch name, a PR title/body (include: issue
-   link, root cause, the repro test, verification results, blast-radius rationale), and
-   the filesChanged/linesChanged/checksAllPassed/reproTestPassed fields. Whether this
-   opens a PR automatically or pauses for approval is decided automatically from the
-   severity/blast-radius already recorded earlier in this run — if it pauses, explain in
-   your next reply what specifically needs a human decision (not just "please approve").
+export default defineDynamic({
+  events: {
+    "session.started": (_event, _ctx) => {
+      if (process.env.ENABLE_DETERMINISTIC_PHASE2 !== "true") return undefined;
+      return defineInstructions({
+        markdown:
+          "## Phase 2 override\n\n" +
+          "Ignore the raw git commands described for Phase 2 steps 1, 2, and 4 above. Instead:\n" +
+          "- Step 1: call `create_branch` with the issue number.\n" +
+          '- Step 2: after editing code, call `run_checks` with `scope` set to "backend", ' +
+          '"frontend", or "both".\n' +
+          "- Step 4: call `commit_and_push` with the branch name and a short description of " +
+          "the fix.\n" +
+          "- Step 5: you no longer need to report severity/blastRadiusTier to `open_pr` — they " +
+          "are read automatically from this run's record.",
+      });
+    },
+  },
+});
 ```
 
-- [ ] **Step 2: Verify no other reference to the removed raw commands remains**
+- [ ] **Step 2: Typecheck**
 
-Run: `grep -n "git -C /workspace checkout\|git -C /workspace add\|git -C /workspace commit\|git -C /workspace push" agent/instructions.md`
-Expected: no output (all four raw command references replaced).
+Run: `npm run typecheck`
+Expected: no errors. If `defineDynamic`'s `events` key `"session.started"` isn't accepted for an
+instructions resolver specifically (the type allows `"session.started" | "turn.started" |
+"step.started"` generally, but a narrower `ALLOWED_DYNAMIC_INSTRUCTION_EVENTS` set exists in
+`node_modules/eve/dist/src/shared/dynamic-tool-definition.d.ts` that wasn't fully enumerated during
+planning), switch to whichever of `"session.started"`/`"turn.started"` the type error accepts.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: Verify flag-off behavior is unaffected**
+
+Run: `npx eve dev` with `ENABLE_DETERMINISTIC_PHASE2` unset, send a test issue through Phase 2 (or
+inspect `eve info`'s discovered-instructions output), and confirm the Phase 2 override text does
+**not** appear in the effective system prompt — only `agent/instructions.md`'s original prose.
+
+- [ ] **Step 4: Verify flag-on behavior activates**
+
+Run: `npx eve dev` with `ENABLE_DETERMINISTIC_PHASE2=true`, repeat the same check, and confirm the
+override markdown **does** appear.
+
+- [ ] **Step 5: Commit**
 
 ```bash
-git add agent/instructions.md
-git commit -m "docs: trim instructions.md now that create_branch/commit_and_push/run_checks exist"
+git add agent/instructions/phase2-tools.ts
+git commit -m "feat: flag-gated dynamic instructions override for create_branch/commit_and_push/run_checks"
 ```
 
 ---
