@@ -16,20 +16,39 @@ const validInput = {
 
 describe("openPrApprovalPolicy", () => {
   it("allows a small, safe, passing fix through without approval", () => {
-    expect(openPrApprovalPolicy({ toolInput: validInput })).toBe("not-applicable");
+    expect(
+      openPrApprovalPolicy({ toolInput: validInput, severity: "medium", blastRadiusTier: "low" }),
+    ).toBe("not-applicable");
   });
 
   it("requires approval for a high-blast-radius fix", () => {
     expect(
-      openPrApprovalPolicy({ toolInput: { ...validInput, blastRadiusTier: "high" } }),
+      openPrApprovalPolicy({ toolInput: validInput, severity: "medium", blastRadiusTier: "high" }),
     ).toBe("user-approval");
   });
 
   it("fails closed when toolInput is undefined", () => {
-    expect(openPrApprovalPolicy({ toolInput: undefined })).toBe("user-approval");
+    expect(
+      openPrApprovalPolicy({ toolInput: undefined, severity: "low", blastRadiusTier: "low" }),
+    ).toBe("user-approval");
   });
 
   it("fails closed when toolInput doesn't match the schema", () => {
-    expect(openPrApprovalPolicy({ toolInput: { nonsense: true } })).toBe("user-approval");
+    expect(
+      openPrApprovalPolicy({
+        toolInput: { nonsense: true },
+        severity: "low",
+        blastRadiusTier: "low",
+      }),
+    ).toBe("user-approval");
+  });
+
+  it("fails closed when severity or blastRadiusTier weren't resolved", () => {
+    expect(
+      openPrApprovalPolicy({ toolInput: validInput, severity: undefined, blastRadiusTier: "low" }),
+    ).toBe("user-approval");
+    expect(
+      openPrApprovalPolicy({ toolInput: validInput, severity: "low", blastRadiusTier: undefined }),
+    ).toBe("user-approval");
   });
 });

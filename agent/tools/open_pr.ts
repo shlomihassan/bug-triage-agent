@@ -2,6 +2,7 @@ import { defineTool } from "eve/tools";
 import { z } from "zod";
 import { Octokit } from "@octokit/rest";
 import { requiresApproval } from "../lib/autonomy";
+import type { Severity, BlastRadiusTier } from "../lib/autonomy";
 import { loadConfig } from "../lib/config";
 import { createRedisStore } from "../lib/store";
 
@@ -10,8 +11,11 @@ export const openPrInputSchema = z.object({
   branch: z.string().min(1),
   title: z.string().min(1),
   body: z.string().min(1),
-  severity: z.enum(["critical", "high", "medium", "low"]),
-  blastRadiusTier: z.enum(["high", "medium", "low"]),
+  // Optional, not removed: kept so the old, currently-running instructions.md prose (which still
+  // tells the model to report these directly) keeps working unchanged when
+  // ENABLE_DETERMINISTIC_PHASE2 is off. See execute()'s flag branch below.
+  severity: z.enum(["critical", "high", "medium", "low"]).optional(),
+  blastRadiusTier: z.enum(["high", "medium", "low"]).optional(),
   filesChanged: z.number().int().nonnegative(),
   linesChanged: z.number().int().nonnegative(),
   checksAllPassed: z.boolean(),
@@ -28,13 +32,17 @@ const store = createRedisStore();
 // own vocabulary and the existing tests assert on it.
 export function openPrApprovalPolicy({
   toolInput,
+  severity,
+  blastRadiusTier,
 }: {
   toolInput?: unknown;
+  severity?: Severity;
+  blastRadiusTier?: BlastRadiusTier;
 }): "user-approval" | "not-applicable" {
-  if (!toolInput) return "user-approval";
+  if (!toolInput || !severity || !blastRadiusTier) return "user-approval";
   const parsed = openPrInputSchema.safeParse(toolInput);
   if (!parsed.success) return "user-approval";
-  return requiresApproval(parsed.data) ? "user-approval" : "not-applicable";
+  return requiresApproval({ ...parsed.data, severity, blastRadiusTier }) ? "user-approval" : "not-applicable";
 }
 
 export default defineTool({
@@ -46,12 +54,25 @@ export default defineTool({
   inputSchema: openPrInputSchema,
   async execute(input, ctx) {
     const config = loadConfig();
+
+    // Flag off (default): exactly today's behavior — trust the model's own input fields.
+    // Flag on: severity/blastRadiusTier are read from the run record instead, overriding
+    // whatever the model passed (it may pass nothing at all once agent/instructions/
+    // phase2-tools.ts, Task 6, stops asking it to).
+    let severity = input.severity;
+    let blastRadiusTier = input.blastRadiusTier;
+    if (process.env.ENABLE_DETERMINISTIC_PHASE2 === "true") {
+      const run = await store.getRun(ctx.session.id).catch(() => null);
+      severity = run?.severity;
+      blastRadiusTier = run?.blastRadiusTier;
+    }
+
     // Deliberately NOT eve's `approval:` HITL gate (see PendingPr's comment in lib/store.ts for
     // why): pausing the session and waiting for it to be resumed turned out to be architecturally
     // unreachable from our own dashboard. Parking the PR request in Redis and letting this turn
     // finish normally means the human decision is a plain REST call from the dashboard later,
     // not a resumed agent session.
-    if (openPrApprovalPolicy({ toolInput: input }) === "user-approval") {
+    if (openPrApprovalPolicy({ toolInput: input, severity, blastRadiusTier }) === "user-approval") {
       await store
         .updateRun(ctx.session.id, {
           status: "awaiting_approval",
