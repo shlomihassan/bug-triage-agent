@@ -62,8 +62,9 @@ Zod.
 - `evals/evals.config.ts` (new) — required run-wide eval config (judge model default).
 - `evals/safety-and-sequence.eval.ts` (new) — gates 1-4 from the spec (no labeled data needed).
 - `evals/cost-ceiling.eval.ts` (new) — gate 7 from the spec (no labeled data needed).
-- `scripts/build-eval-fixture.ts` (new) — pulls candidate historical issues into a labeling scaffold.
-- `evals/fixtures/labeled-issues.json` (new, scaffold — human fills in the actual labels).
+- `scripts/build-eval-fixture.ts` (new) — fully automated: derives labels from each historical
+  issue's real merged closing PR (no manual labeling step).
+- `evals/fixtures/labeled-issues.json` (new) — fully populated by the script above.
 - `evals/autonomy-gate.eval.ts` (new) — gates 5-6 (needs the labeled fixture).
 - `evals/judgment-quality.eval.ts` (new) — soft checks 8-9 (needs the labeled fixture).
 
@@ -963,7 +964,7 @@ git commit -m "test: add structural pre-deploy eval gates (tool sequence, safety
 
 ---
 
-### Task 8: Labeled eval fixture scaffold
+### Task 8: Fully automated eval fixture — labels derived from real closing PRs, no manual step
 
 **Files:**
 - Create: `scripts/build-eval-fixture.ts`
@@ -971,31 +972,76 @@ git commit -m "test: add structural pre-deploy eval gates (tool sequence, safety
 
 **Interfaces:**
 - Produces: `evals/fixtures/labeled-issues.json`, an array of
-  `{ issueNumber: number; issueTitle: string; issueBody: string; expectedSeverity: Severity | null; referenceRootCause: string | null; expectedOutcome: "auto_resolved" | "awaiting_approval" | null }`.
-  The `| null` fields start `null` and must be manually filled in by a human — no code can produce
-  them, since they represent a judgment call about historical issues. This task's deliverable is
-  the scaffold and the labeling instructions, not the labels themselves.
+  `{ issueNumber: number; issueTitle: string; issueBody: string; expectedSeverity: Severity; referenceRootCause: string; expectedOutcome: "auto_resolved" | "awaiting_approval" }` —
+  every field populated by the script itself. No manual editing step exists in this task.
+- Consumes: `octokit.issues.listEventsForTimeline` (confirmed against
+  `node_modules/@octokit/openapi-types/types.d.ts`'s `timeline-cross-referenced-event` schema —
+  its `source.issue.pull_request.merged_at` field identifies, directly from the timeline, which
+  cross-referenced issue is a *merged* PR, with no extra API call needed to check merge status),
+  `octokit.pulls.listFiles` (real diff content), and the **existing** `requiresApproval()` from
+  `agent/lib/autonomy.ts` (reused as-is — `expectedOutcome` is derived by running real historical
+  diff stats through the same deterministic policy function the agent itself uses, not guessed).
+- Ground truth source: for each closed issue, the script finds its real linked *merged* PR (the
+  actual fix that shipped) via GitHub's cross-reference timeline, and derives every label from
+  that PR's real diff — not from a human's memory of an old issue, and not from the agent under
+  test grading itself (which would be circular).
 
-- [ ] **Step 1: Write the scaffold-building script**
+- [ ] **Step 1: Write the fully automated fixture-building script**
 
 ```typescript
 // scripts/build-eval-fixture.ts
 //
-// Pulls the most recent closed/resolved GitHub issues from the fork into a scaffold JSON file
-// for manual labeling. Run this once; then a human fills in expectedSeverity/referenceRootCause/
-// expectedOutcome for each entry by hand before evals/autonomy-gate.eval.ts or
-// evals/judgment-quality.eval.ts (Task 9) can run meaningfully.
+// Fully automated — no manual labeling step. For each closed issue, finds the real PR that
+// fixed it (via GitHub's cross-reference timeline), reads that PR's actual diff, and derives:
+//   - expectedOutcome: deterministically, by running the diff's real stats through the SAME
+//     requiresApproval() policy function agent/lib/autonomy.ts already uses in production.
+//   - expectedSeverity + referenceRootCause: via a strong model reading the issue AND the real
+//     fix diff — grounded in what actually shipped, not a fresh guess.
+// Issues with no identifiable merged closing PR are skipped (logged), not guessed at.
 import { Octokit } from "@octokit/rest";
+import { generateObject } from "ai";
+import { z } from "zod";
 import { writeFileSync } from "node:fs";
 import { loadConfig } from "../agent/lib/config";
+import { opusModel } from "../agent/lib/anthropic";
+import { requiresApproval } from "../agent/lib/autonomy";
 
 interface FixtureEntry {
   issueNumber: number;
   issueTitle: string;
   issueBody: string;
-  expectedSeverity: "critical" | "high" | "medium" | "low" | null;
-  referenceRootCause: string | null;
-  expectedOutcome: "auto_resolved" | "awaiting_approval" | null;
+  expectedSeverity: "critical" | "high" | "medium" | "low";
+  referenceRootCause: string;
+  expectedOutcome: "auto_resolved" | "awaiting_approval";
+}
+
+const judgmentSchema = z.object({
+  severity: z.enum(["critical", "high", "medium", "low"]),
+  blastRadiusTier: z.enum(["high", "medium", "low"]),
+  rootCause: z.string().min(1).max(300),
+});
+
+async function findMergedClosingPr(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  issueNumber: number,
+): Promise<number | null> {
+  const timeline = await octokit.issues.listEventsForTimeline({
+    owner,
+    repo,
+    issue_number: issueNumber,
+    per_page: 100,
+  });
+  for (const event of timeline.data) {
+    if (event.event !== "cross-referenced") continue;
+    const source = (event as { source?: { issue?: { number: number; pull_request?: { merged_at?: string | null } } } }).source;
+    const pr = source?.issue?.pull_request;
+    if (pr && pr.merged_at) {
+      return source!.issue!.number;
+    }
+  }
+  return null;
 }
 
 async function main() {
@@ -1008,25 +1054,67 @@ async function main() {
     per_page: 20,
   });
 
-  const fixture: FixtureEntry[] = issues.data
-    .filter((issue) => !issue.pull_request) // exclude PRs, which this endpoint also returns
-    .map((issue) => ({
+  const fixture: FixtureEntry[] = [];
+
+  for (const issue of issues.data) {
+    if (issue.pull_request) continue; // this endpoint also returns PRs; skip them
+
+    const prNumber = await findMergedClosingPr(octokit, config.githubOwner, config.githubRepo, issue.number);
+    if (!prNumber) {
+      console.log(`[build-eval-fixture] issue #${issue.number}: no merged closing PR found, skipping`);
+      continue;
+    }
+
+    const files = await octokit.pulls.listFiles({
+      owner: config.githubOwner,
+      repo: config.githubRepo,
+      pull_number: prNumber,
+      per_page: 100,
+    });
+    const filesChanged = files.data.length;
+    const linesChanged = files.data.reduce((sum, f) => sum + f.additions + f.deletions, 0);
+    const diffText = files.data
+      .map((f) => `--- ${f.filename} ---\n${f.patch ?? "(no patch available)"}`)
+      .join("\n\n")
+      .slice(0, 8000); // cap prompt size for large PRs
+
+    const { object: judgment } = await generateObject({
+      model: opusModel(),
+      schema: judgmentSchema,
+      system:
+        "You are grading a historical bug fix. Given the original issue report and the actual " +
+        "diff that fixed it, classify: severity (critical/high/medium/low, from user-facing " +
+        "impact), blastRadiusTier (high if the diff touches auth/permissions, database " +
+        "migrations, or a public API contract; medium for a moderate contained change; low for " +
+        "a small isolated change), and a one-sentence rootCause grounded in what the diff " +
+        "actually changed.",
+      prompt: JSON.stringify({ issueTitle: issue.title, issueBody: issue.body ?? "", diffText }),
+    });
+
+    const expectedOutcome = requiresApproval({
+      severity: judgment.severity,
+      blastRadiusTier: judgment.blastRadiusTier,
+      filesChanged,
+      linesChanged,
+      checksAllPassed: true, // ground truth reflects the shipped fix, which passed CI by definition
+      reproTestPassed: true,
+    })
+      ? "awaiting_approval"
+      : "auto_resolved";
+
+    fixture.push({
       issueNumber: issue.number,
       issueTitle: issue.title,
       issueBody: issue.body ?? "",
-      expectedSeverity: null,
-      referenceRootCause: null,
-      expectedOutcome: null,
-    }));
+      expectedSeverity: judgment.severity,
+      referenceRootCause: judgment.rootCause,
+      expectedOutcome,
+    });
+    console.log(`[build-eval-fixture] issue #${issue.number}: derived from PR #${prNumber} → ${judgment.severity}/${expectedOutcome}`);
+  }
 
   writeFileSync("evals/fixtures/labeled-issues.json", JSON.stringify(fixture, null, 2) + "\n");
-  console.log(
-    `[build-eval-fixture] Wrote ${fixture.length} candidate issues to ` +
-      `evals/fixtures/labeled-issues.json — fill in expectedSeverity, referenceRootCause, and ` +
-      `expectedOutcome for each by hand before running evals/autonomy-gate.eval.ts or ` +
-      `evals/judgment-quality.eval.ts. Delete any entries that aren't good eval candidates ` +
-      `(e.g. issues that weren't real bugs).`,
-  );
+  console.log(`[build-eval-fixture] Wrote ${fixture.length} fully-labeled entries to evals/fixtures/labeled-issues.json`);
 }
 
 main().catch((err) => {
@@ -1038,25 +1126,23 @@ main().catch((err) => {
 - [ ] **Step 2: Run the script**
 
 Run: `npx tsx scripts/build-eval-fixture.ts`
-Expected: `evals/fixtures/labeled-issues.json` is created with up to 20 entries, all three label
-fields `null`.
+Expected: `evals/fixtures/labeled-issues.json` is created, fully populated (every field set, no
+manual editing needed) — the log output shows each included issue's derived severity/outcome and
+which PR it came from, and which issues were skipped for lacking a merged closing PR.
 
-- [ ] **Step 3: Manually label the fixture (human step, not code)**
+- [ ] **Step 3: Spot-check the automated output before trusting it as a safety-critical gate**
 
-Open `evals/fixtures/labeled-issues.json` and, for each entry you keep (delete ones that aren't
-good eval candidates — aim for 10-20 remaining), fill in:
-- `expectedSeverity`: what the severity should have been classified as, based on what you know
-  about the issue's real impact.
-- `referenceRootCause`: one sentence describing the actual root cause, for the LLM-judge
-  comparison in Task 9.
-- `expectedOutcome`: `"awaiting_approval"` if the real fix touched auth/permissions/migrations/a
-  public API contract or was otherwise high-risk, `"auto_resolved"` otherwise.
+Open `evals/fixtures/labeled-issues.json` and read through the entries — this is verification, not
+labeling: confirm the `referenceRootCause` values plausibly match what you know about the listed
+issues, and that a couple of `expectedOutcome: "awaiting_approval"` entries actually look
+high-risk. If several entries look wrong, the judgment prompt in Step 1 likely needs tightening —
+fix the script, don't hand-edit the JSON output.
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add scripts/build-eval-fixture.ts evals/fixtures/labeled-issues.json
-git commit -m "test: add eval fixture scaffold and manually-labeled historical issues"
+git commit -m "test: add fully automated eval fixture derived from real historical closing PRs"
 ```
 
 ---
@@ -1068,8 +1154,8 @@ git commit -m "test: add eval fixture scaffold and manually-labeled historical i
 - Create: `evals/judgment-quality.eval.ts`
 
 **Interfaces:**
-- Consumes: `evals/fixtures/labeled-issues.json` (Task 8's output, must be manually labeled first
-  — this task cannot produce a meaningful passing run until Task 8, Step 3 is actually done).
+- Consumes: `evals/fixtures/labeled-issues.json` (Task 8's fully automated output — no manual step
+  is a prerequisite, just run Task 8's script first).
 
 **Interfaces:**
 - Consumes: `t.newSession(): EveEvalSession` (each fixture entry runs as an independent session,
@@ -1093,12 +1179,12 @@ interface FixtureEntry {
   issueNumber: number;
   issueTitle: string;
   issueBody: string;
-  expectedOutcome: "auto_resolved" | "awaiting_approval" | null;
+  expectedOutcome: "auto_resolved" | "awaiting_approval";
 }
 
-const fixture: FixtureEntry[] = (
-  JSON.parse(readFileSync("evals/fixtures/labeled-issues.json", "utf-8")) as FixtureEntry[]
-).filter((entry) => entry.expectedOutcome !== null);
+const fixture: FixtureEntry[] = JSON.parse(
+  readFileSync("evals/fixtures/labeled-issues.json", "utf-8"),
+) as FixtureEntry[]; // fully populated by Task 8's automated script — no filtering needed
 
 export default defineEval({
   test: async (t) => {
@@ -1138,13 +1224,13 @@ interface FixtureEntry {
   issueNumber: number;
   issueTitle: string;
   issueBody: string;
-  expectedSeverity: "critical" | "high" | "medium" | "low" | null;
-  referenceRootCause: string | null;
+  expectedSeverity: "critical" | "high" | "medium" | "low";
+  referenceRootCause: string;
 }
 
-const fixture: FixtureEntry[] = (
-  JSON.parse(readFileSync("evals/fixtures/labeled-issues.json", "utf-8")) as FixtureEntry[]
-).filter((entry) => entry.expectedSeverity !== null && entry.referenceRootCause !== null);
+const fixture: FixtureEntry[] = JSON.parse(
+  readFileSync("evals/fixtures/labeled-issues.json", "utf-8"),
+) as FixtureEntry[]; // fully populated by Task 8's automated script — no filtering needed
 
 export default defineEval({
   test: async (t) => {
