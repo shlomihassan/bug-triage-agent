@@ -1265,6 +1265,55 @@ git commit -m "test: add labeled autonomy-gate and judgment-quality eval checks"
 
 ---
 
+### Task 10: Deploy to preview, verify e2e, then promote to production
+
+**Files:** none — this is a deployment/verification procedure, not code.
+
+**Interfaces:** None new. Uses the `ENABLE_DETERMINISTIC_PHASE2` flag (Tasks 5-6) as the sole
+promotion mechanism — no code changes between preview and production, only where the flag is set.
+
+- [ ] **Step 1: Push the branch and deploy to a Vercel preview environment**
+
+**Requires your go-ahead before running** — pushes to the remote and deploys shared infrastructure.
+`git push origin <branch>` then `vercel deploy` (no `--prod`), with `ENABLE_DETERMINISTIC_PHASE2=true`
+set as a **preview-scoped** environment variable only (production untouched).
+
+- [ ] **Step 2: Run the eval suite against the preview deployment**
+
+Run: `npx eve eval safety-and-sequence cost-ceiling autonomy-gate judgment-quality --url <preview-url>`
+Expected: same pass/fail profile as the local runs in Tasks 7 and 9. Any regression here — pass
+locally, fail on preview — points at an environment difference (env vars, sandbox backend) rather
+than the code itself.
+
+- [ ] **Step 3: Trigger 2 real GitHub issues against the fork and let the agent run end-to-end**
+
+**Requires your go-ahead before running** — creates real issues, spends real API cost, may open a
+real PR. Pick two issues covering different paths on purpose: one that should auto-resolve, one
+that should hit `awaiting_approval` (e.g. touching an auth/permissions file), so both branches of
+the flag-gated behavior get exercised live, not just the happy path.
+
+- [ ] **Step 4: Review both runs before deciding to promote**
+
+Check `check-runs.ts` output and the dashboard for both runs: correct branch name, `run_checks`
+actually ran and reported real pass/fail, `open_pr` took the expected path (auto vs. parked), no
+cost anomaly. Do not proceed to Step 5 if either run looks wrong — go back to the relevant task
+instead.
+
+- [ ] **Step 5: Promote — set the flag in production**
+
+**Requires your explicit go-ahead before running** — this is the actual production cutover. Set
+`ENABLE_DETERMINISTIC_PHASE2=true` as a **production** environment variable and deploy
+(`vercel deploy --prod` or merge to whatever branch triggers production deploy in this project).
+
+- [ ] **Step 6: Confirm the rollback path**
+
+Note for the record (no action needed unless something goes wrong later): rollback from
+production is flipping `ENABLE_DETERMINISTIC_PHASE2` back to `false` and redeploying — no code
+revert needed, since `agent/instructions.md` and `open_pr`'s old-path behavior were never touched
+by this plan.
+
+---
+
 ## Explicitly out of scope for this plan
 
 - **`workflows/bug-triage-workflow.ts`** — deferred until Task 1's findings are in; plan it
